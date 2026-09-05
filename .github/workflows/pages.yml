@@ -2,7 +2,8 @@ name: Deploy Gish Chat frontend to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -16,11 +17,11 @@ concurrency:
 
 jobs:
   deploy:
+    runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
-    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -29,16 +30,34 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Prepare site
+      - name: Prepare website
         run: |
           mkdir -p _site
-          cp -R public/. _site/
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+          if [ -f "public/index.html" ]; then
+            echo "Using public/ as website root"
+            cp -R public/. _site/
+          elif [ -f "index.html" ]; then
+            echo "Using repository root as website root"
+            cp -R . _site/
+            rm -rf _site/.git
+            rm -rf _site/.github
+            rm -rf _site/node_modules
+            rm -rf _site/server
+          else
+            echo "ERROR: index.html not found"
+            find . -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+          echo "Website files:"
+          find _site -maxdepth 2 -type f | sort
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
-      - name: Deploy
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
