@@ -1,1 +1,0 @@
-{"name":"gish-chat","version":"5.0.0","private":true,"description":"Gish Chat advanced realtime messenger","main":"server.js","scripts":{"start":"node server.js","dev":"node server.js"},"dependencies":{"bcryptjs":"^2.4.3","express":"^4.21.2","jsonwebtoken":"^9.0.2","multer":"^2.0.2","socket.io":"^4.8.1"}}
