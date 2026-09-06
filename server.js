@@ -11,6 +11,9 @@ const { createClient } = require('@supabase/supabase-js');
 const { Server } = require('socket.io');
 
 const app = express();
+
+// Railway/Reverse-proxy fix: trust the proxy so express-rate-limit can safely
+// use X-Forwarded-For without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = Number(process.env.PORT || 3000);
@@ -86,7 +89,7 @@ async function getUser(id) {
   return safeUser(r.rows[0]);
 }
 async function getUserRawByEmail(email) {
-  const r = await q('SELECT * FROM public.users WHERE lower(email)=lower($1) LIMIT 1', [email]);
+  const r = await q('SELECT * FROM users WHERE lower(email)=lower($1) LIMIT 1', [email]);
   return r.rows[0] || null;
 }
 async function isMember(cid, uid) {
@@ -364,8 +367,6 @@ io.on('connection', socket => {
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false})}else online.set(uid,n)});
 });
-
-app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/api',(req,res)=>res.status(404).json({error:'API endpoint not found'}));
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
