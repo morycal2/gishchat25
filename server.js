@@ -86,7 +86,7 @@ async function getUser(id) {
   return safeUser(r.rows[0]);
 }
 async function getUserRawByEmail(email) {
-  const r = await q('SELECT * FROM users WHERE lower(email)=lower($1) LIMIT 1', [email]);
+  const r = await q('SELECT * FROM public.users WHERE lower(email)=lower($1) LIMIT 1', [email]);
   return r.rows[0] || null;
 }
 async function isMember(cid, uid) {
