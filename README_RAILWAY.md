@@ -33,3 +33,11 @@ Do not expose `SUPABASE_SERVICE_ROLE_KEY` to the browser. Keep it only in Railwa
 - Screen sharing: available from video calls after camera/microphone permission is granted.
 - AI: configure the three AI variables above to enable the assistant.
 - PWA: the service worker is registered automatically and the app can be installed by supported browsers.
+
+
+## v8.1.4 fixes
+- Fixed stale frontend/cache issues by bumping app.js and Service Worker cache.
+- Saved Messages and Settings routes are included in server.js.
+- Added a persistent Settings quick-access button in the drawer.
+- Socket.IO uses polling on Railway to avoid noisy WebSocket upgrade failures while retaining real-time events.
+- Updated Zento logo asset.

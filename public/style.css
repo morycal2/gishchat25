@@ -79,3 +79,8 @@ body.dark .folder-bar{background:#16212b}.dark .feature-grid button,.dark .ttl-g
 .messages{overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .chats,.results,.info-list,.settings-content,.folder-list,.profile-variants,.bot-list,.badge-list,.folder-picks,.search-results-list{scrollbar-width:thin;overscroll-behavior:contain}
 @media(max-width:850px){.modal{padding:0}.modal-card,.info-card,.admin-card,.settings-shell,.media-editor-card{max-height:100dvh}.drawer{height:100dvh}.drawer-list{padding-bottom:max(10px,env(safe-area-inset-bottom))}}
+
+/* v8.1.4 drawer/settings visibility */
+#drawerSettingsQuick{position:absolute;right:12px;left:12px;bottom:12px;width:calc(100% - 24px);padding:12px 14px;border-radius:12px;background:var(--panel);border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.14);text-align:right;font-weight:800;color:var(--text);z-index:5}
+.drawer{padding-bottom:62px}
+.drawer-list{padding-bottom:18px}

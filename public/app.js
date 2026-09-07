@@ -20,7 +20,7 @@ async function boot(){
  try{me=await api('/api/me');showApp();refreshUserUI();await loadSettings();connectSocket();await loadConvs();}catch(e){localStorage.removeItem('zento_token');token=null;showAuth();showToast(e.message,true)}
 }
 function connectSocket(){
- socket=io(BACKEND_URL||undefined,{auth:{token},transports:['polling','websocket'],upgrade:true,reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,reconnectionDelayMax:5000});
+ socket=io(BACKEND_URL||undefined,{auth:{token},transports:['polling'],upgrade:false,reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,reconnectionDelayMax:5000});
  socket.on('connect_error',e=>console.warn('socket',e.message));
  socket.on('message',m=>{if(current&&Number(m.conversation_id)===Number(current.id))appendMessage(m);loadConvs().catch(()=>{})});
  socket.on('reaction',d=>{const el=document.querySelector(`[data-msg="${d.messageId}"]`);if(el)renderReactions(el,d.reactions)});
@@ -153,7 +153,7 @@ $('chatMore').onclick=()=>{if(current){const action=prompt('گزینه را ان
 stage1Style();
 const _stage1Boot=boot;boot=async()=>{await _stage1Boot();if(token&&me)await stage1Load()};
 
-boot().then(()=>stage2HandleMessageHash()).catch(e=>console.error('boot',e));
+boot().then(()=>window.stage2HandleMessageHash?.()).catch(e=>console.error('boot',e));
 
 document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a){e.preventDefault();const u=a.dataset.username;api('/api/users?q='+encodeURIComponent(u)).then(us=>{const x=us.find(z=>String(z.username).toLowerCase()===String(u).toLowerCase());if(x)openUserProfile(x.id);else showToast('کاربر پیدا نشد',true)}).catch(()=>{})}});
 
@@ -223,7 +223,7 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
   let deviceId=localStorage.getItem('zento_device_id');
   if(!deviceId){deviceId=crypto.randomUUID?crypto.randomUUID():'dev_'+Date.now()+'_'+Math.random().toString(36).slice(2);localStorage.setItem('zento_device_id',deviceId)}
   let installPrompt=null, activeGame=null, gameModalOpen=false;
-  window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;});
+  window.addEventListener('beforeinstallprompt',e=>{installPrompt=e;});
   window.addEventListener('appinstalled',()=>{installPrompt=null;showToast('زنتو روی دستگاه نصب شد 📲')});
 
   function stage4Modal(title,body,opts={}){
@@ -290,6 +290,8 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
 
   const oldLogout4=logout;logout=async()=>{activeGame=null;gameModalOpen=false;return oldLogout4()};
   addDrawer();setTimeout(addDrawer,900);
+  function addSettingsQuickAccess(){const drawer=document.querySelector('.drawer');if(!drawer||document.getElementById('drawerSettingsQuick'))return;const b=document.createElement('button');b.id='drawerSettingsQuick';b.type='button';b.textContent='⚙️ تنظیمات';b.onclick=()=>{closeDrawer();openSettings()};drawer.appendChild(b)}
+  setTimeout(addSettingsQuickAccess,100);setTimeout(addSettingsQuickAccess,1000);
   if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 })();
 
