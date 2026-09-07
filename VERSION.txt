@@ -1,2 +1,0 @@
-Zento v8.1.6
-Fixes: removed stale Stage-1 boot reference, fixed saved-media duration display, hardened startup against optional migration/storage failures, improved WebRTC remote-stream handling and cache busting.

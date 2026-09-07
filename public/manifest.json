@@ -1,12 +1,19 @@
 {
-  "name": "زنتو",
-  "short_name": "زنتو",
-  "description": "پیام‌رسان زنتو",
+  "name": "Zento",
+  "short_name": "Zento",
+  "description": "Zento — پیام‌رسان سریع و حرفه‌ای",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#090b18",
   "theme_color": "#229ed9",
   "lang": "fa",
   "dir": "rtl",
-  "icons": [{"src":"zento-icon.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]
+  "icons": [
+    {
+      "src": "gish-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }

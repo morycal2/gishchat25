@@ -1,53 +1,90 @@
-## v8.1.3 — Scroll & Saved Messages Fix
+# Gish Chat v6 — GitHub Pages + Render + Supabase
 
-- اسکرول داخلی برای منوی کناری و پنل‌های بلند اضافه شد.
-- بخش «پیام‌های ذخیره‌شده» فعال شد و ارسال متن/فایل داخل آن کار می‌کند.
-- جستجو در پیام‌های ذخیره‌شده اضافه شد.
-- گفتگوی خصوصی ذخیره‌ها به‌صورت hidden در لیست گفتگوها نگهداری می‌شود.
-- نسخه cache فرانت‌اند به 82 افزایش یافت.
+نسخه حرفه‌ای‌تر گیش چت، با جداسازی کامل Frontend و Backend:
 
-# Zento 6.1 — Railway + Supabase
+- **Frontend:** GitHub Pages
+- **Backend:** Render Web Service (Node.js + Express + Socket.IO)
+- **Database:** Supabase PostgreSQL
+- **File storage:** Supabase Storage
+- **Auth:** JWT + bcrypt
+- **Realtime:** Socket.IO
+- **Uploads:** بدون دیسک محلی؛ فایل‌ها مستقیماً در Object Storage ذخیره می‌شوند.
 
-نسخه‌ی ارتقایافته‌ی Zento با رابط الهام‌گرفته از پیام‌رسان‌های مدرن و Telegram، بدون وابستگی به رفرش صفحه برای پیام‌های جدید.
+## 1) ساخت دیتابیس و Storage در Supabase
 
-## امکانات این نسخه
-- اعلان خطا داخل خود سایت (Toast) به‌جای `alert` مرورگر.
-- پیام‌رسانی لحظه‌ای با Socket.IO و نمایش فوری پیام ارسال‌شده.
-- گروه و کانال با مدیریت مالک/ادمین/مدیر میانی، افزودن و حذف ادمین و حذف عضو.
-- پنل تنظیمات تفکیک‌شده برای اعلان‌ها، داده و رسانه، حریم خصوصی، امنیت و ظاهر.
-- صفحه/پنل مستقل «پیام‌های ذخیره‌شده» شبیه Saved Messages.
-- پنل سه‌بخشی ایموجی، GIF و استیکر.
-- ساخت GIF کوتاه از ویدیو در مرورگر با gif.js و آپلود آن به Storage.
-- ساخت/آپلود استیکر از تصویر و ارسال مستقیم در چت.
-- دانلود رسانه‌ها (عکس، ویدیو، صدا، فایل، GIF و استیکر) از مسیر امن Backend.
-- ضبط پیام صوتی با MediaRecorder.
-- تماس صوتی/تصویری WebRTC با UI جدید و signaling توسط Socket.IO.
-- واکنش، پاسخ به پیام، حذف پیام و جستجوی کاربر.
-- طراحی responsive برای موبایل و دسکتاپ + حالت شب.
-- سازگاری با دیتابیس‌های قدیمی users و password/password_hash.
-- `trust proxy` برای رفع خطای Railway و express-rate-limit.
+در Supabase یک پروژه بساز و فایل `supabase/schema.sql` را در SQL Editor اجرا کن. این فایل جداول کاربران، گفتگوها، اعضا، پیام‌ها، ذخیره‌ها، بلاک‌ها و گزارش‌ها را می‌سازد و Bucket عمومی `gish-files` را برای رسانه‌ها ایجاد می‌کند.
 
-## متغیرهای محیطی Railway
-- `DATABASE_URL` — connection string پستگرس Supabase (برای شبکه IPv4 بهتر است از pooler استفاده شود).
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `JWT_SECRET`
-- `FRONTEND_ORIGIN` — آدرس فرانت‌اند در صورت جدا بودن از Backend.
-- `STORAGE_BUCKET` اختیاری، پیش‌فرض `gish-files`.
+از Supabase این دو مقدار را بردار:
 
-## اجرا
+- Project URL → `SUPABASE_URL`
+- `service_role` API key → `SUPABASE_SERVICE_ROLE_KEY`
+
+همچنین از بخش Database، `DATABASE_URL` را بردار. کلید service role فقط باید روی Backend بماند.
+
+## 2) Deploy Backend روی Render
+
+Repository را به Render وصل کن و Blueprint را از `render.yaml` بساز. این متغیرها را در Environment وارد کن:
+
+```text
+DATABASE_URL=...
+SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+FRONTEND_ORIGIN=https://morycal2.github.io
+```
+
+`JWT_SECRET` توسط Render ساخته می‌شود.
+
+بعد از Deploy، آدرس سرویس مثلاً:
+
+```text
+https://gish-chat-backend.onrender.com
+```
+
+خواهد بود. آدرس `/health` باید JSON با `ok: true` برگرداند.
+
+## 3) اتصال GitHub Pages
+
+در `public/config.js` مقدار `API_URL` را با آدرس واقعی Render جایگزین کن:
+
+```js
+window.GISH_CONFIG={API_URL:'https://YOUR-SERVICE.onrender.com'};
+```
+
+سپس push کن. Workflow داخل `.github/workflows/pages.yml` پوشه `public/` را روی GitHub Pages منتشر می‌کند.
+
+## 4) مهاجرت داده‌های قدیمی
+
+اگر `data/gish.json` نسخه قبلی را داری، آن را داخل پروژه در همین مسیر قرار بده و پس از تنظیم `.env` اجرا کن:
+
 ```bash
-npm install
+npm ci
+npm run migrate:json
+```
+
+اسکریپت کاربران، گفتگوها، اعضا، پیام‌ها، saved messages، بلاک‌ها و گزارش‌ها را به PostgreSQL منتقل می‌کند.
+
+## 5) اجرای محلی
+
+```bash
+cp .env.example .env
+npm ci
 npm start
 ```
 
-اگر فرانت‌اند روی GitHub Pages است، مقدار `API_URL` را در `public/config.js` روی آدرس Railway قرار بده.
+سپس `http://localhost:3000` را باز کن.
 
-## Zento v8.1 — Railway fixes
+## نکته درباره «رایگان و دائمی»
 
-این نسخه خطاهای گزارش‌شده‌ی Railway/Chrome را برطرف می‌کند:
-- رفع `stage2HandleMessageHash is not defined` و پشتیبانی از لینک مستقیم پیام با `#/msg/<conversationId>/<messageId>`
-- جلوگیری از درخواست‌های `/api/preferences`, `/api/folders`, `/api/profiles` قبل از احراز هویت
-- اضافه شدن API کامل `/api/settings` برای تنظیمات اعلان، حریم خصوصی، امنیت و ظاهر
-- رفع مشکل Socket.IO روی دامنه‌های Railway با CORS مناسب
-- حفظ نصب PWA با دکمه نصب داخلی؛ پیام `beforeinstallprompt.preventDefault()` یک هشدار informational مربوط به رفتار PWA مرورگر است، نه خطای برنامه
+این معماری دیگر به دیسک محلی Render وابسته نیست؛ بنابراین restart/deploy بک‌اند فایل‌ها و داده‌های اصلی را از بین نمی‌برد. با این حال «رایگان» به معنی تضمین دائمی نیست: Render Free Web Service محدودیت‌های خود را دارد و Free Postgres خود Render بعد از ۳۰ روز منقضی می‌شود، به همین دلیل این نسخه PostgreSQL و Storage را روی Supabase نگه می‌دارد. Supabase Free فعلاً ۵۰۰MB دیتابیس و ۱GB Storage دارد و پروژه‌های بدون فعالیت پس از یک هفته pause می‌شوند. برای داده‌های مهم، بکاپ مستقل توصیه می‌شود.
+
+
+## Zento deployment
+This build is prepared for Railway: frontend and backend are served by the same Node service by default. Set `DATABASE_URL`, `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and optionally `STORAGE_BUCKET`.
+
+### Fixed in this build
+- Removed the broken stage-function dependency that caused `ReferenceError` crashes in the deployed frontend.
+- Added `/api/settings`, `/api/account`, working `/api/saved`, and media-only message support.
+- Added persistent voice/video-message duration (`messages.duration_ms`).
+- Added voice/video call signaling with polling/WebSocket fallback and incoming ringtone.
+- Added a video-message recorder with live recording timer.
+- Default API URL is the same Railway origin, so no separate frontend URL is required.
