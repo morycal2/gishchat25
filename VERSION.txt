@@ -1,2 +1,2 @@
-Zento v8.1.4
-Fixes: settings visibility, saved chat API compatibility in current server, cache busting, PWA prompt behavior, Railway Socket.IO polling, logo update.
+Zento v8.1.5
+Fixes: WebRTC audio/video calls, incoming call ringtone, remote audio playback, ICE candidate buffering, call timer, voice/video-message recording duration and video notes.

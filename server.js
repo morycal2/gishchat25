@@ -258,7 +258,7 @@ app.post('/api/conversations/:id/join', auth, async (req, res) => {
 app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   const cid = Number(req.params.id);
   if (!await isMember(cid, req.user.id)) return res.status(403).json({ error: 'ابتدا باید عضو این گفتگو باشید' });
-  const r = await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids
+  const r = await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids,media_meta
     FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 300`, [cid]);
   const rows = r.rows.reverse(); const out = []; for (const m of rows) out.push(await messageView(m));
   res.json(out);
@@ -287,10 +287,10 @@ async function canMessage(cid, uid) {
   return { ok: true, conversation: c };
 }
 
-async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType='', fileName='', replyTo=null, profileId=null, expiresIn=null, quoteIds=[], botId=null }) {
+async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType='', fileName='', replyTo=null, profileId=null, expiresIn=null, quoteIds=[], botId=null, mediaMeta={} }) {
   const expiresAt = expiresIn ? new Date(Date.now()+Number(expiresIn)*1000) : null;
-  const r = await q(`INSERT INTO messages(conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,profile_id,expires_at,quote_ids,bot_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [cid, uid, text, fileUrl, fileType, fileName, kind, replyTo, profileId, expiresAt, JSON.stringify(Array.isArray(quoteIds)?quoteIds.map(Number).filter(Boolean):[]), botId]);
+  const r = await q(`INSERT INTO messages(conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,profile_id,expires_at,quote_ids,bot_id,media_meta)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [cid, uid, text, fileUrl, fileType, fileName, kind, replyTo, profileId, expiresAt, JSON.stringify(Array.isArray(quoteIds)?quoteIds.map(Number).filter(Boolean):[]), botId, JSON.stringify(mediaMeta||{})]);
   await q('UPDATE conversations SET updated_at=now() WHERE id=$1', [cid]);
   return messageView(r.rows[0]);
 }
@@ -305,8 +305,9 @@ app.post('/api/messages', auth, async (req, res) => {
     const profileId=req.body.profileId?Number(req.body.profileId):null;
     const expiresIn=req.body.expiresIn?Number(req.body.expiresIn):null;
     const quoteIds=Array.isArray(req.body.quoteIds)?req.body.quoteIds:[];
+    const mediaMeta=req.body.mediaMeta && typeof req.body.mediaMeta==='object' ? req.body.mediaMeta : {};
     if (!text && !fileUrl) return res.status(400).json({ error: 'پیام خالی است' });
-    const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
+    const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds, mediaMeta });
     io.to('conv:' + cid).emit('message', out);
     res.json(out);
   } catch (e) { console.error(e); res.status(500).json({ error: 'ارسال پیام ناموفق بود' }); }
@@ -321,13 +322,13 @@ app.get('/api/conversations/:id/search', auth, async (req,res)=>{
     const params=[cid,text,sender,from,to];
     let where=`conversation_id=$1 AND deleted=false AND ($2='' OR text ILIKE '%'||$2||'%') AND ($3::bigint IS NULL OR sender_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4) AND ($5::timestamptz IS NULL OR created_at < $5)`;
     if(type==='image') where += ` AND file_type LIKE 'image/%'`; else if(type==='video') where += ` AND file_type LIKE 'video/%'`; else if(type==='audio') where += ` AND (file_type LIKE 'audio/%' OR kind='voice')`; else if(type==='file') where += ` AND file_url<>'' AND file_type NOT LIKE 'image/%' AND file_type NOT LIKE 'video/%' AND file_type NOT LIKE 'audio/%'`; else if(type==='link') where += ` AND text ~* 'https?://[^[:space:]]+'`;
-    const r=await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids FROM messages WHERE ${where} ORDER BY id DESC LIMIT 100`,params);
+    const r=await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids,media_meta FROM messages WHERE ${where} ORDER BY id DESC LIMIT 100`,params);
     const out=[]; for(const m of r.rows) out.push(await messageView(m)); res.json(out);
   }catch(e){console.error(e);res.status(500).json({error:'جستجو ناموفق بود'})}
 });
 app.post('/api/conversations/:id/read', auth, async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});await q('UPDATE conversation_members SET last_read_at=now() WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);await q(`INSERT INTO message_receipts(message_id,user_id,delivered_at,read_at) SELECT id,$2,now(),now() FROM messages WHERE conversation_id=$1 AND sender_id<>$2 AND deleted=false AND NOT EXISTS(SELECT 1 FROM message_receipts mr WHERE mr.message_id=messages.id AND mr.user_id=$2)`,[cid,req.user.id]);io.to('conv:'+cid).emit('read_receipt',{conversationId:cid,userId:req.user.id});res.json({ok:true})});
 app.get('/api/messages/:id/link',auth,async(req,res)=>{const r=await q('SELECT id,conversation_id FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!r.rowCount||!await isMember(r.rows[0].conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});res.json({url:`${String(req.protocol)}://${req.get('host')}/#/msg/${r.rows[0].conversation_id}/${r.rows[0].id}`})});
-app.post('/api/messages/:id/forward',auth,async(req,res)=>{try{const src=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!src.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});const m=src.rows[0], target=Number(req.body.conversationId);const ck=await canMessage(target,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const out=await insertMessage({cid:target,uid:req.user.id,text:m.text,kind:m.kind,fileUrl:m.file_url,fileType:m.file_type,fileName:m.file_name,profileId:null,quoteIds:[m.id]});io.to('conv:'+target).emit('message',out);res.json(out)}catch(e){console.error(e);res.status(500).json({error:'فوروارد ناموفق بود'})}});
+app.post('/api/messages/:id/forward',auth,async(req,res)=>{try{const src=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!src.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});const m=src.rows[0], target=Number(req.body.conversationId);const ck=await canMessage(target,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const out=await insertMessage({cid:target,uid:req.user.id,text:m.text,kind:m.kind,fileUrl:m.file_url,fileType:m.file_type,fileName:m.file_name,profileId:null,quoteIds:[m.id],mediaMeta:m.media_meta||{}});io.to('conv:'+target).emit('message',out);res.json(out)}catch(e){console.error(e);res.status(500).json({error:'فوروارد ناموفق بود'})}});
 function safeFileName(name) { return path.basename(String(name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(0, 120); }
 async function uploadToStorage(file, folder, userId) {
   const ext = path.extname(file.originalname).toLowerCase();
@@ -519,7 +520,7 @@ io.on('connection', async socket => {
   socket.on('send_message', async d => {
     try { const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok)return;
       const text=String(d.text||'').trim().slice(0,5000), fileUrl=String(d.fileUrl||'').slice(0,1000), fileType=String(d.fileType||'').slice(0,120), fileName=safeFileName(d.fileName||'');
-      if(!text&&!fileUrl)return; const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out);
+      if(!text&&!fileUrl)return; const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[],mediaMeta:d.mediaMeta&&typeof d.mediaMeta==='object'?d.mediaMeta:{}}); io.to('conv:'+cid).emit('message',out);
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
