@@ -34,3 +34,12 @@ npm start
 ```
 
 اگر فرانت‌اند روی GitHub Pages است، مقدار `API_URL` را در `public/config.js` روی آدرس Railway قرار بده.
+
+## Zento v8.1 — Railway fixes
+
+این نسخه خطاهای گزارش‌شده‌ی Railway/Chrome را برطرف می‌کند:
+- رفع `stage2HandleMessageHash is not defined` و پشتیبانی از لینک مستقیم پیام با `#/msg/<conversationId>/<messageId>`
+- جلوگیری از درخواست‌های `/api/preferences`, `/api/folders`, `/api/profiles` قبل از احراز هویت
+- اضافه شدن API کامل `/api/settings` برای تنظیمات اعلان، حریم خصوصی، امنیت و ظاهر
+- رفع مشکل Socket.IO روی دامنه‌های Railway با CORS مناسب
+- حفظ نصب PWA با دکمه نصب داخلی؛ پیام `beforeinstallprompt.preventDefault()` یک هشدار informational مربوط به رفتار PWA مرورگر است، نه خطای برنامه

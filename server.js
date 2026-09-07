@@ -41,7 +41,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 
 function corsOrigin(origin, cb) {
-  if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+  if (!origin || allowedOrigins.includes(origin) || /^https:\/\/[^/]+\.railway\.app$/i.test(origin)) return cb(null, true);
   cb(new Error('CORS origin not allowed'));
 }
 const io = new Server(server, {
@@ -372,8 +372,27 @@ app.post('/api/profile/avatar', auth, (req, res) => {
 
 // ---- Zento Stage 1: appearance, folders, chat locks, profiles ----
 const defaultTheme={accent:'#3390ec',mine:'#2b6cff',theirs:'#ffffff',background:'#dce9f4',bubbleRadius:18,shadow:true,fontSize:15,compact:false};
+const defaultSettings={
+  notifications:{messages:true,sounds:true,previews:true},
+  data_usage:{autoplay:true,autoDownloadImages:true,autoDownloadVideos:false,autoDownloadAudio:false},
+  privacy:{lastSeen:'everyone',profilePhoto:'everyone',readReceipts:true},
+  security:{twoStep:false},
+  appearance:{dark:false,compact:false}
+};
+function mergeSettings(value){return {
+  ...defaultSettings,
+  ...(value||{}),
+  notifications:{...defaultSettings.notifications,...((value||{}).notifications||{})},
+  data_usage:{...defaultSettings.data_usage,...((value||{}).data_usage||{})},
+  privacy:{...defaultSettings.privacy,...((value||{}).privacy||{})},
+  security:{...defaultSettings.security,...((value||{}).security||{})},
+  appearance:{...defaultSettings.appearance,...((value||{}).appearance||{})}
+};}
 app.get('/api/preferences', auth, async (req,res)=>{ const r=await q('SELECT theme FROM user_preferences WHERE user_id=$1',[req.user.id]); res.json({theme:{...defaultTheme,...(r.rows[0]?.theme||{})}}); });
 app.put('/api/preferences', auth, async (req,res)=>{ const theme={...defaultTheme,...(req.body.theme||{})}; await q(`INSERT INTO user_preferences(user_id,theme) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET theme=EXCLUDED.theme,updated_at=now()`,[req.user.id,JSON.stringify(theme)]); res.json({theme}); });
+// Backwards-compatible settings API used by the Telegram-inspired settings UI.
+app.get('/api/settings', auth, async (req,res)=>{ const r=await q('SELECT settings FROM user_preferences WHERE user_id=$1',[req.user.id]); res.json(mergeSettings(r.rows[0]?.settings)); });
+app.put('/api/settings', auth, async (req,res)=>{ const settings=mergeSettings(req.body); await q(`INSERT INTO user_preferences(user_id,settings) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET settings=EXCLUDED.settings,updated_at=now()`,[req.user.id,JSON.stringify(settings)]); res.json(settings); });
 app.get('/api/folders', auth, async (req,res)=>{ const r=await q(`SELECT f.id,f.name,f.icon,f.position,COALESCE(json_agg(m.conversation_id) FILTER(WHERE m.conversation_id IS NOT NULL),'[]') conversations FROM chat_folders f LEFT JOIN chat_folder_members m ON m.folder_id=f.id WHERE f.user_id=$1 GROUP BY f.id ORDER BY f.position,f.id`,[req.user.id]); res.json(r.rows.map(x=>({...x,id:Number(x.id),conversations:(x.conversations||[]).map(Number)}))); });
 app.post('/api/folders', auth, async (req,res)=>{ const name=String(req.body.name||'').trim().slice(0,40); const icon=String(req.body.icon||'📁').slice(0,4); if(!name)return res.status(400).json({error:'نام پوشه لازم است'}); try{const r=await q('INSERT INTO chat_folders(user_id,name,icon,position) VALUES($1,$2,$3,(SELECT COALESCE(max(position)+1,0) FROM chat_folders WHERE user_id=$1)) RETURNING *',[req.user.id,name,icon]);res.json({...r.rows[0],id:Number(r.rows[0].id),conversations:[]})}catch(e){res.status(409).json({error:'این پوشه قبلاً وجود دارد'})}});
 app.put('/api/folders/:id', auth, async (req,res)=>{const id=Number(req.params.id);const name=String(req.body.name||'').trim().slice(0,40);const icon=String(req.body.icon||'📁').slice(0,4);await q('UPDATE chat_folders SET name=$1,icon=$2 WHERE id=$3 AND user_id=$4',[name,icon,id,req.user.id]);res.json({ok:true})});
@@ -600,8 +619,10 @@ async function ensureStage1Schema(){
   await q(`CREATE TABLE IF NOT EXISTS user_preferences (
     user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     theme JSONB NOT NULL DEFAULT '{}'::jsonb,
+    settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await q(`ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb`);
   await q(`CREATE TABLE IF NOT EXISTS chat_folders (
     id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '📁', position INT NOT NULL DEFAULT 0,

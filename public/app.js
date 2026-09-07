@@ -30,7 +30,23 @@ function connectSocket(){
 async function loadSettings(){try{settings=await api('/api/settings')}catch{settings={notifications:{messages:true,sounds:true,previews:true},data_usage:{autoplay:true,autoDownloadImages:true,autoDownloadVideos:false,autoDownloadAudio:false},privacy:{lastSeen:'everyone',profilePhoto:'everyone',readReceipts:true},security:{twoStep:false}}}}
 async function loadConvs(){convs=await api('/api/conversations');renderConvs();await handleJoinHash()}
 async function handleJoinHash(){const m=location.hash.match(/^#\/join\/([^/]+)$/);if(!m)return;try{const info=await api('/api/public/conversations/'+encodeURIComponent(m[1]));const c=await api('/api/conversations/'+info.id+'/join',{method:'POST'});await loadConvs();openConv(c.id);history.replaceState(null,'',location.pathname+location.search)}catch(e){showToast(e.message,true)}}
-window.addEventListener('hashchange',handleJoinHash)
+async function stage2HandleMessageHash(){
+  if(!token)return;
+  const m=location.hash.match(/^#\/msg\/(\d+)\/(\d+)$/); if(!m)return;
+  const cid=Number(m[1]), mid=Number(m[2]);
+  try{
+    if(!convs.length) await loadConvs();
+    if(!convs.some(c=>Number(c.id)===cid)) return showToast('این گفتگو برای حساب شما در دسترس نیست',true);
+    await openConv(cid);
+    setTimeout(()=>{
+      const row=document.querySelector(`[data-msg="${mid}"]`);
+      if(row){row.scrollIntoView({behavior:'smooth',block:'center'});row.classList.add('stage2-highlight');setTimeout(()=>row.classList.remove('stage2-highlight'),1800)}
+      else showToast('پیام پیدا نشد یا حذف شده است',true);
+    },120);
+  }catch(e){showToast(e.message,true)}
+}
+window.addEventListener('hashchange',handleJoinHash);
+window.addEventListener('hashchange',stage2HandleMessageHash)
 function renderConvs(){const list=activeFilter==='all'?convs:convs.filter(c=>c.type===activeFilter);$('chats').innerHTML=list.map(c=>{const other=c.type==='direct'?c.members.find(x=>Number(x.id)!==Number(me.id)):null;const title=c.type==='direct'?(other?.display_name||'گفتگو'):c.name;const icon=c.type==='channel'?'📢':c.type==='group'?'👥':'گ';return `<button class="chat-item ${current&&Number(current.id)===Number(c.id)?'active':''}" data-id="${c.id}">${c.type==='direct'?avatar(other):`<div class="avatar">${icon}</div>`}<div class="ci"><b>${esc(title)}</b><small>${c.type==='channel'?'کانال':c.type==='group'?`${c.members.length} عضو`:'@'+esc(other?.username||'')} · ${esc(c.last_text||'')}</small></div><span class="type-badge">${c.unread_count>0?`<b class="unread-badge">${c.unread_count>99?'99+':c.unread_count}</b>`:''}${c.type==='channel'?'کانال':c.type==='group'?'گروه':'خصوصی'}</span></button>`}).join('')||'<div class="empty"><span>گفتگویی پیدا نشد</span></div>'}
 $('chats').onclick=e=>{const x=e.target.closest('.chat-item');if(x)openConv(Number(x.dataset.id))};
 async function openConv(id){const found=convs.find(c=>Number(c.id)===Number(id));if(!found)return;current=found;renderConvs();if(socket?.connected)socket.emit('join',current.id);const other=current.type==='direct'?current.members.find(x=>Number(x.id)!==Number(me.id)):null;$('chatAvatar').outerHTML=`<div id="chatAvatar" class="avatar">${current.type==='direct'?(other?.avatar?`<img src="${esc(backendUrl(other.avatar))}">`:esc((other?.display_name||'گ')[0])):(current.type==='channel'?'📢':'👥')}</div>`;$('chatTitle').textContent=current.type==='direct'?(other?.display_name||'گفتگو'):current.name;$('chatStatus').textContent=current.type==='channel'?`📢 ${current.members.length} عضو`:current.type==='group'?`👥 ${current.members.length} عضو`:`@${other?.username||''}`;document.querySelector('#chatAvatar')?.addEventListener('click',()=>current.type==='direct'&&other?openUserProfile(other.id):openConversationInfo(current));$('chatTitle').onclick=current.type==='direct'&&other?()=>openUserProfile(other.id):(current.type==='group'||current.type==='channel'?()=>openConversationInfo(current):null);const can=current.type!=='channel'||Number(current.owner_id)===Number(me.id);$('text').disabled=!can;$('send').disabled=!can;$('voice').disabled=!can;$('text').placeholder=can?'پیامی بنویس...':'این کانال فقط برای مشاهده است';$('messages').innerHTML='<div class="empty">در حال بارگذاری…</div>';try{const ms=await api(`/api/conversations/${id}/messages`);$('messages').innerHTML='';try{await api(`/api/conversations/${id}/read`,{method:'POST'});found.unread_count=0;renderConvs()}catch{}if(!ms.length)$('messages').innerHTML='<div class="empty"><b>شروع گفتگو</b><span>اولین پیام را بفرست 👋</span></div>';ms.forEach(appendMessage);scrollBottom();if(innerWidth<851)$('sidebar').classList.remove('open')}catch(e){$('messages').innerHTML=`<div class="empty"><b>خطا در باز کردن گفتگو</b><span>${esc(e.message)}</span></div>`}}
@@ -129,9 +145,9 @@ const stage2OldChatMore=$('chatMore').onclick;
 $('chatMore').onclick=()=>{if(current){const action=prompt('گزینه را انتخاب کن:\n1 = تنظیم پیام‌های ناپدیدشونده\n2 = جستجو در گفتگو\n3 = کپی لینک گفتگو','2');if(action==='1')return stage2SetExpiry();if(action==='2')return stage2SearchDialog();}if(stage2OldChatMore)stage2OldChatMore()};
 
 stage1Style();
-const _stage1Boot=boot;boot=async()=>{await stage1Load();await _stage1Boot()};
+const _stage1Boot=boot;boot=async()=>{await _stage1Boot();if(token&&me)await stage1Load()};
 
-boot().then(()=>stage2HandleMessageHash());
+boot().then(()=>stage2HandleMessageHash()).catch(e=>console.error('boot',e));
 
 document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a){e.preventDefault();const u=a.dataset.username;api('/api/users?q='+encodeURIComponent(u)).then(us=>{const x=us.find(z=>String(z.username).toLowerCase()===String(u).toLowerCase());if(x)openUserProfile(x.id);else showToast('کاربر پیدا نشد',true)}).catch(()=>{})}});
 
