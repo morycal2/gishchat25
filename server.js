@@ -748,11 +748,15 @@ async function ensureStorageBucket(){
 setInterval(async()=>{try{const r=await q(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at<=now() RETURNING id,conversation_id`);for(const x of r.rows)io.to('conv:'+x.conversation_id).emit('message_deleted',Number(x.id));}catch(e){console.error('expiry cleanup',e.message)}},5000);
 
 async function start(){
-  await q('SELECT 1');
-  await ensureStage1Schema();
-  await ensureStage3Schema();
-  await ensureStage4Schema();
-  await ensureStorageBucket();
+  // Start the HTTP service first so Railway can reach /health even if an
+  // optional migration/storage check needs attention. Existing databases are
+  // upgraded in place; a failed optional step is logged instead of taking the
+  // whole service down behind a 502.
   server.listen(PORT,()=>console.log(`Zento PostgreSQL backend listening on port ${PORT}`));
+  try { await q('SELECT 1'); } catch (e) { console.error('Database connection failed:', e); return; }
+  for (const [name,fn] of [['stage1',ensureStage1Schema],['stage3',ensureStage3Schema],['stage4',ensureStage4Schema],['storage',ensureStorageBucket]]) {
+    try { await fn(); console.log(`Zento ${name} setup OK`); }
+    catch (e) { console.error(`Zento ${name} setup failed:`, e); }
+  }
 }
-start().catch(e=>{console.error('Startup failed:',e);process.exit(1)});
+start();
