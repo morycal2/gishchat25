@@ -1,0 +1,6 @@
+services:
+  coturn:
+    image: coturn/coturn
+    ports:
+      - "3478:3478"
+      - "5349:5349"
