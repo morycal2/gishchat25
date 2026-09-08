@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -7,6 +8,7 @@ const multer = require('multer');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
+const ws = require("ws");
 const { createClient } = require('@supabase/supabase-js');
 const { Server } = require('socket.io');
 
@@ -36,9 +38,15 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    realtime: {
+      transport: ws
+    }
+  }
+);
 
 function corsOrigin(origin, cb) { cb(null, true); }
 const io = new Server(server, {
