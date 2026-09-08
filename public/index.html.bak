@@ -44,41 +44,10 @@
 
 <div id="savedModal" class="modal hidden"><div class="saved-shell"><header class="saved-head"><button id="closeSaved">×</button><div class="avatar">🔖</div><div><b>پیام‌های ذخیره‌شده</b><small>فضای شخصی شما</small></div><input id="savedSearch" placeholder="جستجو در ذخیره‌شده‌ها..." class="saved-search"></header><div id="savedList" class="saved-list"></div><form id="savedComposer" class="composer saved-composer"><input id="savedFile" type="file" hidden accept="image/*,video/*,audio/*,.gif,.webp,.pdf,.zip,.txt"><button id="savedAttach" type="button" class="tool">📎</button><input id="savedText" autocomplete="off" placeholder="پیامی برای خودت بنویس..."><button class="send" type="submit">➤</button></form></div></div>
 
-<div id="recordingPanel" class="recording-panel hidden" aria-hidden="true">
-  <div class="recording-card">
-    <div class="recording-head"><div><b id="recordingTitle">ضبط پیام صوتی</b><small id="recordingState">در حال ضبط</small></div><div id="recordingTimer" class="recording-timer">00:00</div></div>
-    <div id="recordingPreviewWrap" class="recording-preview-wrap hidden"><video id="recordingPreview" autoplay muted playsinline></video></div>
-    <div class="recording-progress"><span id="recordingDot" class="recording-dot"></span><span id="recordingSecondsText">00:00</span></div>
-    <div id="recordingAudioPreview" class="recording-audio-preview hidden">
-      <div class="recording-preview-icon">🎧</div>
-      <div><b>پیش‌نمایش ضبط</b><small id="recordingPreviewStatus">برای گوش دادن روی پخش بزن</small></div>
-    </div>
-    <div class="recording-actions">
-      <button type="button" id="recordingPlay" class="recording-play" disabled>▶ پخش</button>
-      <button type="button" id="recordingPause" class="recording-pause">⏸ توقف</button>
-      <button type="button" id="recordingCancel" class="recording-cancel">✕ لغو</button>
-      <button type="button" id="recordingSend" class="recording-send">➤ ارسال</button>
-    </div>
-  </div>
-</div>
 <div id="mediaPreviewModal" class="modal hidden"><div class="media-editor-card"><div class="modal-head"><h3>پیش‌نمایش و ویرایش</h3><button id="mediaPreviewClose">×</button></div><div id="mediaPreviewBody" class="media-preview-body"></div><label>کپشن <textarea id="mediaCaption" maxlength="2000" placeholder="یک کپشن بنویس..."></textarea></label><div id="imageEditTools" class="media-edit-tools hidden"><button id="rotateMedia" type="button">↻ چرخش تصویر</button><button id="resetMedia" type="button">بازنشانی</button></div><div class="modal-actions"><button id="mediaPreviewCancel" type="button">لغو</button><button id="mediaPreviewSend" type="button" class="primary">ارسال</button></div></div></div>
 
 <div id="callModal" class="call-modal hidden"><div class="call-card"><div class="call-top"><div><span id="callType">تماس تصویری</span><small id="callTimer">00:00</small></div><button id="endCall">×</button></div><div class="remote-wrap"><video id="remoteVideo" autoplay playsinline></video><div id="callAvatar" class="call-avatar">گ</div><span id="callName">تماس</span><div id="callStatusText" class="call-status">در حال اتصال…</div></div><video id="localVideo" class="local-video" autoplay muted playsinline></video><div class="call-actions"><button id="speakerCall">🔊</button><button id="muteCall">🎙</button><button id="cameraCall">▣</button><button id="screenShareCall" title="اشتراک صفحه">🖥️</button><button id="acceptCall" class="accept-call hidden">✓ پاسخ</button><button id="rejectCall" class="reject-call hidden">✕ رد</button></div></div></div>
 <div id="lightbox" class="lightbox hidden"><button id="lightboxClose">×</button><img id="lightboxImg" alt="تصویر"></div>
-
-<div id="mediaPlayerModal" class="custom-media-modal hidden" aria-hidden="true">
-  <div class="custom-media-shell" id="customMediaShell">
-    <div class="custom-media-top"><div><span id="customMediaKind">پخش رسانه</span><b id="customMediaTitle">رسانه</b></div><button id="customMediaClose" class="custom-media-close">×</button></div>
-    <div id="customMediaStage" class="custom-media-stage"></div>
-    <div id="customMediaMeta" class="custom-media-meta"></div>
-    <div id="customMediaControls" class="custom-media-controls">
-      <button id="customMediaPlay" class="media-control-main">▶</button>
-      <div class="media-time"><span id="customMediaCurrent">00:00</span><input id="customMediaSeek" type="range" min="0" max="100" value="0"><span id="customMediaDuration">00:00</span></div>
-      <button id="customMediaMute">🔊</button><button id="customMediaSpeed">1×</button><button id="customMediaFullscreen">⛶</button>
-    </div>
-    <div id="customImageControls" class="custom-image-controls hidden"><button data-zoom="out">−</button><button data-zoom="reset">100%</button><button data-zoom="in">＋</button><button data-zoom="fit">⤢</button></div>
-  </div>
-</div>
 <input id="avatarFile" type="file" hidden accept="image/jpeg,image/png,image/webp,image/gif">
-<script src="app.js?v=85"></script>
+<script src="app.js?v=84"></script>
 </body></html>
