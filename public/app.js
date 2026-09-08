@@ -65,7 +65,92 @@ $('composer').onsubmit=async e=>{e.preventDefault();if(!current)return;const tex
 $('text').oninput=()=>{if(!current||!socket?.connected)return;socket.emit('typing',{conversationId:current.id,typing:true});clearTimeout(window.tt);window.tt=setTimeout(()=>socket.emit('typing',{conversationId:current.id,typing:false}),900)};
 $('cancelReply').onclick=()=>{replyTo=null;$('replyBar').classList.add('hidden')};
 $('attach').onclick=()=>$('file').click();$('file').onchange=async()=>{const f=$('file').files[0];if(!f||!current)return;try{showToast('در حال آپلود فایل…');const fd=new FormData();fd.append('file',f);const u=await api('/api/upload',{method:'POST',body:fd});const kind=f.type==='image/gif'?'gif':f.type.startsWith('image/')?'image':f.type.startsWith('video/')?'video':f.type.startsWith('audio/')?'audio':'file';const out=await api('/api/messages',{method:'POST',body:JSON.stringify({conversationId:current.id,text:'',fileUrl:u.url,fileType:u.mime,fileName:u.name,kind})});appendMessage(out);scrollBottom();$('file').value=''}catch(e){showToast(e.message,true)}};
-$('voice').onclick=async()=>{if(!current)return;if(!navigator.mediaDevices?.getUserMedia)return showToast('ضبط صدا در این مرورگر پشتیبانی نمی‌شود',true);if(window._rec?.state==='recording'){window._rec.stop();return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});const rec=new MediaRecorder(stream);const chunks=[];rec.ondataavailable=e=>chunks.push(e.data);rec.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});const fd=new FormData();fd.append('file',blob,'voice.webm');try{const u=await api('/api/upload',{method:'POST',body:fd});const out=await api('/api/messages',{method:'POST',body:JSON.stringify({conversationId:current.id,fileUrl:u.url,fileType:u.mime,fileName:'voice.webm',kind:'voice'})});appendMessage(out);scrollBottom()}catch(e){showToast(e.message,true)}};window._rec=rec;rec.start();showToast('ضبط پیام صوتی شروع شد؛ برای توقف دوباره 🎙 را بزن')}catch(e){showToast('اجازه دسترسی به میکروفون داده نشد',true)}};
+let messageRecorder=null;
+let messageRecorderStream=null;
+let messageRecorderChunks=[];
+let messageRecorderMode='voice';
+let messageRecorderStartedAt=0;
+let messageRecorderPausedAt=0;
+let messageRecorderPausedTotal=0;
+let messageRecorderTimer=null;
+let messageRecorderSending=false;
+function formatRecordTime(sec){sec=Math.max(0,Math.floor(sec));return `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`}
+function updateRecordTimer(){
+  const elapsed=(messageRecorderPausedAt?messageRecorderPausedAt:Date.now())-messageRecorderStartedAt-messageRecorderPausedTotal;
+  const txt=formatRecordTime(elapsed/1000);
+  $('recordingTimer').textContent=txt;$('recordingSecondsText').textContent=txt;
+}
+function closeRecordingPanel(){
+  clearInterval(messageRecorderTimer);messageRecorderTimer=null;
+  $('recordingPanel')?.classList.add('hidden');$('recordingPanel')?.classList.remove('paused');$('recordingPanel')?.setAttribute('aria-hidden','true');
+  if($('recordingPreview')){$('recordingPreview').srcObject=null}
+}
+function resetMessageRecorder(){
+  clearInterval(messageRecorderTimer);messageRecorderTimer=null;
+  messageRecorder=null;messageRecorderChunks=[];messageRecorderStartedAt=0;messageRecorderPausedAt=0;messageRecorderPausedTotal=0;messageRecorderSending=false;
+  if(messageRecorderStream){messageRecorderStream.getTracks().forEach(t=>t.stop());messageRecorderStream=null}
+  closeRecordingPanel();
+}
+function cancelMessageRecording(){
+  try{if(messageRecorder&&messageRecorder.state!=='inactive')messageRecorder.stop()}catch{}
+  resetMessageRecorder();showToast('ضبط پیام لغو شد');
+}
+async function sendMessageRecording(){
+  if(messageRecorderSending||!messageRecorder)return;
+  messageRecorderSending=true;$('recordingSend').disabled=true;$('recordingPause').disabled=true;$('recordingCancel').disabled=true;$('recordingState').textContent='در حال آماده‌سازی…';
+  const rec=messageRecorder;
+  try{
+    if(rec.state!=='inactive'){
+      await new Promise(resolve=>{const done=()=>resolve();rec.addEventListener('stop',done,{once:true});try{rec.stop()}catch{resolve()}});
+    }
+    if(messageRecorderStream){messageRecorderStream.getTracks().forEach(t=>t.stop());messageRecorderStream=null}
+    const mime=rec.mimeType|| (messageRecorderMode==='video'?'video/webm':'audio/webm');
+    const ext=messageRecorderMode==='video'?'webm':'webm';
+    const blob=new Blob(messageRecorderChunks,{type:mime});
+    if(!blob.size)throw Error('ضبط خالی است');
+    const fd=new FormData();fd.append('file',blob,messageRecorderMode==='video'?`video-message-${Date.now()}.${ext}`:`voice-${Date.now()}.${ext}`);
+    $('recordingState').textContent='در حال آپلود…';
+    const u=await api('/api/upload',{method:'POST',body:fd});
+    const out=await api('/api/messages',{method:'POST',body:JSON.stringify({conversationId:current.id,fileUrl:u.url,fileType:u.mime||mime,fileName:u.name,kind:messageRecorderMode==='video'?'video':'voice'})});
+    appendMessage(out);scrollBottom();resetMessageRecorder();
+  }catch(e){messageRecorderSending=false;$('recordingSend').disabled=false;$('recordingPause').disabled=false;$('recordingCancel').disabled=false;$('recordingState').textContent='خطا در ارسال';showToast(e.message||'ارسال پیام ناموفق بود',true)}
+}
+function toggleMessageRecordingPause(){
+  if(!messageRecorder||messageRecorderSending)return;
+  const panel=$('recordingPanel');
+  if(messageRecorder.state==='recording'){
+    messageRecorder.pause();messageRecorderPausedAt=Date.now();panel.classList.add('paused');$('recordingPause').textContent='▶ ادامه';$('recordingState').textContent='متوقف شده';clearInterval(messageRecorderTimer);
+  }else if(messageRecorder.state==='paused'){
+    messageRecorderPausedTotal+=Date.now()-messageRecorderPausedAt;messageRecorderPausedAt=0;messageRecorder.resume();panel.classList.remove('paused');$('recordingPause').textContent='⏸ توقف';$('recordingState').textContent='در حال ضبط';messageRecorderTimer=setInterval(updateRecordTimer,250);
+  }
+}
+async function startMessageRecording(mode){
+  if(!current)return;
+  if(messageRecorder&&messageRecorder.state!=='inactive')return;
+  if(!navigator.mediaDevices?.getUserMedia)return showToast('ضبط در این مرورگر پشتیبانی نمی‌شود',true);
+  if(mode==='video'&&location.protocol!=='https:'&&location.hostname!=='localhost')return showToast('برای ضبط ویدیو باید سایت با HTTPS باز شود',true);
+  try{
+    messageRecorderMode=mode;
+    const stream=await navigator.mediaDevices.getUserMedia(mode==='video'?{audio:true,video:{facingMode:'user'}}:{audio:true});
+    messageRecorderStream=stream;
+    const options=mode==='video'?{mimeType:'video/webm;codecs=vp8,opus'}:{mimeType:'audio/webm;codecs=opus'};
+    let rec;try{rec=MediaRecorder.isTypeSupported(options.mimeType)?new MediaRecorder(stream,options):new MediaRecorder(stream)}catch{rec=new MediaRecorder(stream)}
+    messageRecorder=rec;messageRecorderChunks=[];messageRecorderStartedAt=Date.now();messageRecorderPausedAt=0;messageRecorderPausedTotal=0;messageRecorderSending=false;
+    $('recordingTitle').textContent=mode==='video'?'ضبط ویدیو مسیج':'ضبط پیام صوتی';$('recordingState').textContent='در حال ضبط';$('recordingTimer').textContent='00:00';$('recordingSecondsText').textContent='00:00';$('recordingPause').textContent='⏸ توقف';$('recordingPause').disabled=false;$('recordingCancel').disabled=false;$('recordingSend').disabled=false;
+    const previewWrap=$('recordingPreviewWrap');const preview=$('recordingPreview');
+    if(mode==='video'){previewWrap.classList.remove('hidden');preview.srcObject=stream}else{previewWrap.classList.add('hidden');preview.srcObject=null}
+    const panel=$('recordingPanel');panel.classList.remove('hidden','paused');panel.setAttribute('aria-hidden','false');
+    rec.ondataavailable=e=>{if(e.data?.size)messageRecorderChunks.push(e.data)};
+    rec.onerror=()=>showToast('خطا هنگام ضبط پیام',true);
+    rec.onstop=()=>{if(!messageRecorderSending){clearInterval(messageRecorderTimer)}};
+    rec.start(250);messageRecorderTimer=setInterval(updateRecordTimer,250);updateRecordTimer();
+  }catch(e){resetMessageRecorder();showToast(mode==='video'?'اجازه دسترسی به دوربین یا میکروفون داده نشد':'اجازه دسترسی به میکروفون داده نشد',true)}
+}
+$('voice').onclick=()=>startMessageRecording('voice');
+$('videoVoice').onclick=()=>startMessageRecording('video');
+$('recordingPause').onclick=toggleMessageRecordingPause;
+$('recordingCancel').onclick=cancelMessageRecording;
+$('recordingSend').onclick=sendMessageRecording;
 $('emoji').onclick=()=>{$('emojiPanel').classList.toggle('hidden');renderMediaTab('emoji')};document.querySelectorAll('[data-media-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-media-tab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');renderMediaTab(b.dataset.mediaTab)});
 function renderMediaTab(tab){const body=$('emojiBody');if(tab==='emoji'){body.innerHTML='<div class="emoji-grid">'+emojis.map(e=>`<button>${e}</button>`).join('')+'</div>';body.querySelectorAll('button').forEach(b=>b.onclick=()=>{$('text').value+=b.textContent;$('text').focus()})}else if(tab==='gif'){body.innerHTML=`<div class="media-picker"><div><b>GIF</b><p>GIF آماده را بفرست یا از یک ویدیو GIF کوتاه بساز.</p><input id="gifUpload" type="file" accept="image/gif,video/*" hidden><button class="primary" onclick="$('gifUpload').click()">انتخاب GIF / ویدیو</button><div id="gifProgress" style="margin-top:10px;font-size:10px"></div></div></div>`;$('gifUpload').onchange=()=>{const f=$('gifUpload').files[0];if(!f)return;if(f.type==='image/gif')uploadSpecial(f,'gif');else createGifFromVideo(f)}}else{body.innerHTML=`<div class="media-picker"><div><b>استیکر</b><p>یک PNG یا WEBP را به استیکر تبدیل کن و ارسال کن.</p><input id="stickerUpload" type="file" accept="image/png,image/webp,image/jpeg" hidden><button class="primary" onclick="$('stickerUpload').click()">ساخت / آپلود استیکر</button></div></div>`;$('stickerUpload').onchange=()=>uploadSpecial($('stickerUpload').files[0],'sticker')}}
 async function uploadSpecial(file,kind){if(!file||!current)return;try{const fd=new FormData();fd.append('file',file,kind==='sticker'?'sticker.webp':'animation.gif');const u=await api('/api/upload',{method:'POST',body:fd});const out=await api('/api/messages',{method:'POST',body:JSON.stringify({conversationId:current.id,fileUrl:u.url,fileType:u.mime,fileName:u.name,kind})});appendMessage(out);$('emojiPanel').classList.add('hidden');scrollBottom()}catch(e){showToast(e.message,true)}}
