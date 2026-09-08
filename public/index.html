@@ -34,6 +34,15 @@
 <div id="drawerShade" class="drawer-shade hidden"></div><aside id="drawer" class="drawer"><div class="drawer-profile"><button id="drawerAvatar" class="drawer-avatar"><span id="drawerAvatarText">گ</span></button><b id="drawerName">کاربر</b><small id="drawerUser">@user</small></div><div class="drawer-list"><button id="drawerProfile">👤 <span>پروفایل من</span></button><button id="drawerNewGroup">👥 <span>گروه جدید</span></button><button id="drawerNewChannel">📢 <span>کانال جدید</span></button><button id="drawerSaved">🔖 <span>پیام‌های ذخیره‌شده</span></button><button id="drawerStories">📸 <span>استوری‌ها</span></button><div class="drawer-sep"></div><button id="drawerSettings">⚙️ <span>تنظیمات</span></button><button id="drawerTheme">🌙 <span>حالت شب</span><i id="themeState">خاموش</i></button><button id="drawerLogout">↪ <span>خروج</span></button></div><div class="drawer-version">Zento · v8.0 · Telegram-inspired</div></aside>
 
 <div id="modal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3 id="modalTitle">ساخت</h3><button id="modalX">×</button></div><div id="modalBody"></div><div class="modal-actions"><button id="modalCancel">لغو</button><button id="modalOk" class="primary">تأیید</button></div></div></div>
+<div id="zentoDialog" class="zento-dialog hidden" aria-hidden="true">
+  <div class="zento-dialog-card" role="dialog" aria-modal="true" aria-labelledby="zentoDialogTitle">
+    <div class="zento-dialog-icon" id="zentoDialogIcon">✦</div>
+    <div class="zento-dialog-head"><div><small id="zentoDialogEyebrow">زنتو</small><h3 id="zentoDialogTitle">پیام</h3></div><button id="zentoDialogClose" class="zento-dialog-close" aria-label="بستن">×</button></div>
+    <div id="zentoDialogMessage" class="zento-dialog-message"></div>
+    <input id="zentoDialogInput" class="zento-dialog-input hidden" autocomplete="off">
+    <div class="zento-dialog-actions"><button id="zentoDialogCancel">لغو</button><button id="zentoDialogOk" class="primary">تأیید</button></div>
+  </div>
+</div>
 <div id="profileModal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3>پروفایل من</h3><button id="closeProfile">×</button></div><div class="profile-preview"><button id="profileAvatarBtn" class="avatar huge">گ</button><div><b id="profileUser"></b><small>برای تغییر عکس روی تصویر بزن</small></div></div><label>نام نمایشی<input id="profileName"></label><label>شناسه کاربری<input id="profileUsername" maxlength="30" placeholder="username"></label><label>بیو<input id="profileBio" maxlength="160"></label><button id="saveProfile" class="primary full">ذخیره تغییرات</button></div></div>
 
 <div id="settingsModal" class="modal hidden"><div class="settings-shell"><div class="modal-head"><h3>تنظیمات</h3><button id="closeSettings">×</button></div><div class="settings-layout"><nav id="settingsNav"><button class="active" data-section="notifications">🔔 اعلان‌ها</button><button data-section="data">📶 داده و رسانه</button><button data-section="privacy">🔐 حریم خصوصی</button><button data-section="security">🛡️ امنیت</button><button data-section="appearance">🎨 ظاهر</button></nav><section id="settingsContent"></section></div></div></div>
@@ -80,5 +89,5 @@
   </div>
 </div>
 <input id="avatarFile" type="file" hidden accept="image/jpeg,image/png,image/webp,image/gif">
-<script src="app.js?v=85"></script>
+<script src="app.js?v=86"></script>
 </body></html>
