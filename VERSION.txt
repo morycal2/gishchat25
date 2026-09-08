@@ -1,2 +1,1 @@
-Zento v8.1.4
-Fixes: settings visibility, saved chat API compatibility in current server, cache busting, PWA prompt behavior, Railway Socket.IO polling, logo update.
+v3.6-custom-media-profile-folders

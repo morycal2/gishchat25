@@ -369,6 +369,42 @@ app.post('/api/profile/avatar', auth, (req, res) => {
   });
 });
 
+// Profile media: up to 10 photos and 2 songs per account.
+app.get('/api/profile/media', auth, async (req,res)=>{
+  const r=await q('SELECT id,kind,url,name,mime,size,position,created_at FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[req.user.id]);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id),position:Number(x.position||0),size:Number(x.size||0)})));
+});
+app.post('/api/profile/photos', auth, (req,res)=>{
+  upload.single('photo')(req,res,async err=>{
+    try{
+      if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
+      if(!req.file||!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype))return res.status(400).json({error:'عکس JPG، PNG، WEBP یا GIF انتخاب کنید'});
+      const count=await q("SELECT count(*)::int AS n FROM profile_media WHERE user_id=$1 AND kind='photo'",[req.user.id]);
+      if(Number(count.rows[0].n)>=10)return res.status(400).json({error:'حداکثر ۱۰ عکس پروفایل مجاز است'});
+      const stored=await uploadToStorage(req.file,'profile-photos',req.user.id);
+      const pos=Number(count.rows[0].n);
+      const r=await q("INSERT INTO profile_media(user_id,kind,url,name,mime,size,position) VALUES($1,'photo',$2,$3,$4,$5,$6) RETURNING *",[req.user.id,stored.url,safeFileName(req.file.originalname),req.file.mimetype,req.file.size,pos]);
+      res.json({...r.rows[0],id:Number(r.rows[0].id),position:Number(r.rows[0].position)});
+    }catch(e){console.error(e);res.status(500).json({error:'ذخیره عکس پروفایل ناموفق بود'})}
+  });
+});
+app.delete('/api/profile/photos/:id', auth, async(req,res)=>{await q("DELETE FROM profile_media WHERE id=$1 AND user_id=$2 AND kind='photo'",[Number(req.params.id),req.user.id]);res.json({ok:true})});
+app.post('/api/profile/songs', auth, (req,res)=>{
+  upload.single('song')(req,res,async err=>{
+    try{
+      if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
+      if(!req.file||!/^audio\//.test(req.file.mimetype))return res.status(400).json({error:'یک فایل صوتی معتبر انتخاب کنید'});
+      const count=await q("SELECT count(*)::int AS n FROM profile_media WHERE user_id=$1 AND kind='song'",[req.user.id]);
+      if(Number(count.rows[0].n)>=2)return res.status(400).json({error:'حداکثر ۲ آهنگ در پروفایل مجاز است'});
+      const stored=await uploadToStorage(req.file,'profile-songs',req.user.id);
+      const pos=Number(count.rows[0].n);
+      const r=await q("INSERT INTO profile_media(user_id,kind,url,name,mime,size,position) VALUES($1,'song',$2,$3,$4,$5,$6) RETURNING *",[req.user.id,stored.url,safeFileName(req.file.originalname),req.file.mimetype,req.file.size,pos]);
+      res.json({...r.rows[0],id:Number(r.rows[0].id),position:Number(r.rows[0].position)});
+    }catch(e){console.error(e);res.status(500).json({error:'ذخیره آهنگ ناموفق بود'})}
+  });
+});
+app.delete('/api/profile/songs/:id', auth, async(req,res)=>{await q("DELETE FROM profile_media WHERE id=$1 AND user_id=$2 AND kind='song'",[Number(req.params.id),req.user.id]);res.json({ok:true})});
+
 
 // ---- Zento Stage 1: appearance, folders, chat locks, profiles ----
 const defaultTheme={accent:'#3390ec',mine:'#2b6cff',theirs:'#ffffff',background:'#dce9f4',bubbleRadius:18,shadow:true,fontSize:15,compact:false};
@@ -433,7 +469,8 @@ app.get('/api/users/:id/profile', auth, async (req, res) => {
   const u = await getUser(id); if (!u) return res.status(404).json({ error: 'کاربر پیدا نشد' });
   const blocked = (await q('SELECT 1 FROM blocks WHERE user_id=$1 AND blocked_id=$2',[req.user.id,id])).rowCount > 0;
   const blockedBy = (await q('SELECT 1 FROM blocks WHERE user_id=$1 AND blocked_id=$2',[id,req.user.id])).rowCount > 0;
-  res.json({...u,blocked,blockedBy});
+  const media=await q('SELECT id,kind,url,name,mime,position FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[id]);
+  res.json({...u,blocked,blockedBy,photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)}))});
 });
 app.post('/api/users/:id/block', auth, async (req, res) => {
   const id = Number(req.params.id); if (!await getUser(id) || id === req.user.id) return res.status(400).json({ error: 'کاربر نامعتبر است' });
@@ -688,6 +725,12 @@ async function ensureStage1Schema(){
     is_default BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(user_id,username)
   )`);
+  await q(`CREATE TABLE IF NOT EXISTS profile_media (
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('photo','song')), url TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    mime TEXT NOT NULL DEFAULT '', size BIGINT NOT NULL DEFAULT 0, position INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_profile_media_user_kind ON profile_media(user_id,kind,position,id)`);
   await q(`CREATE TABLE IF NOT EXISTS conversation_profiles (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
