@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: gish-chat-backend
+    name: zento-chat-backend
     runtime: node
     plan: free
     buildCommand: npm install
@@ -20,6 +20,6 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: STORAGE_BUCKET
-        value: gish-files
+        value: zento-files
       - key: SEED_DEMO
         value: "false"
