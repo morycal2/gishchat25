@@ -6,7 +6,7 @@
 <link rel="icon" type="image/png" href="zento-icon.png"><link rel="apple-touch-icon" href="zento-icon.png"><link rel="manifest" href="manifest.json">
 <title>زنتو — پیام‌رسان</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css"><script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script><script src="config.js"></script>
+<link rel="stylesheet" href="style.css"><script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script><script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script><script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script><script src="config.js"></script>
 </head>
 <body>
 <div id="toast" class="toast"></div>
@@ -66,6 +66,7 @@
 <div id="callModal" class="call-modal hidden"><div class="call-card"><div class="call-top"><div><span id="callType">تماس تصویری</span><small id="callTimer">00:00</small></div><button id="endCall">×</button></div><div class="remote-wrap"><video id="remoteVideo" autoplay playsinline></video><div id="callAvatar" class="call-avatar">گ</div><span id="callName">تماس</span><div id="callStatusText" class="call-status">در حال اتصال…</div></div><video id="localVideo" class="local-video" autoplay muted playsinline></video><div class="call-actions"><button id="speakerCall">🔊</button><button id="muteCall">🎙</button><button id="cameraCall">▣</button><button id="screenShareCall" title="اشتراک صفحه">🖥️</button><button id="acceptCall" class="accept-call hidden">✓ پاسخ</button><button id="rejectCall" class="reject-call hidden">✕ رد</button></div></div></div>
 <div id="lightbox" class="lightbox hidden"><button id="lightboxClose">×</button><img id="lightboxImg" alt="تصویر"></div>
 
+<div id="storyModal" class="story-modal hidden" aria-hidden="true"><div class="story-shell"><button id="storyClose" class="story-close">×</button><div class="story-progress" id="storyProgress"></div><div id="storyStage" class="story-stage"></div><div class="story-top"><div id="storyUser" class="story-user"></div><div id="storyCounter" class="story-counter"></div></div><button id="storyPrev" class="story-nav story-prev">‹</button><button id="storyNext" class="story-nav story-next">›</button><div id="storyCaption" class="story-caption"></div></div></div>
 <div id="mediaPlayerModal" class="custom-media-modal hidden" aria-hidden="true">
   <div class="custom-media-shell" id="customMediaShell">
     <div class="custom-media-top"><div><span id="customMediaKind">پخش رسانه</span><b id="customMediaTitle">رسانه</b></div><button id="customMediaClose" class="custom-media-close">×</button></div>

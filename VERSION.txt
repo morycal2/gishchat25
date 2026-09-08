@@ -1,1 +1,1 @@
-v3.6-custom-media-profile-folders
+3.7.0
