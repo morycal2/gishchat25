@@ -380,7 +380,7 @@ app.post('/api/profile/photos', auth, (req,res)=>{
       if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
       if(!req.file||!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype))return res.status(400).json({error:'عکس JPG، PNG، WEBP یا GIF انتخاب کنید'});
       const count=await q("SELECT count(*)::int AS n FROM profile_media WHERE user_id=$1 AND kind='photo'",[req.user.id]);
-      if(Number(count.rows[0].n)>=10)return res.status(400).json({error:'حداکثر ۱۰ عکس پروفایل مجاز است'});
+      if(Number(count.rows[0].n)>=24)return res.status(400).json({error:'حداکثر ۲۴ عکس پروفایل مجاز است'});
       const stored=await uploadToStorage(req.file,'profile-photos',req.user.id);
       const pos=Number(count.rows[0].n);
       const r=await q("INSERT INTO profile_media(user_id,kind,url,name,mime,size,position) VALUES($1,'photo',$2,$3,$4,$5,$6) RETURNING *",[req.user.id,stored.url,safeFileName(req.file.originalname),req.file.mimetype,req.file.size,pos]);
@@ -395,7 +395,7 @@ app.post('/api/profile/songs', auth, (req,res)=>{
       if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
       if(!req.file||!/^audio\//.test(req.file.mimetype))return res.status(400).json({error:'یک فایل صوتی معتبر انتخاب کنید'});
       const count=await q("SELECT count(*)::int AS n FROM profile_media WHERE user_id=$1 AND kind='song'",[req.user.id]);
-      if(Number(count.rows[0].n)>=2)return res.status(400).json({error:'حداکثر ۲ آهنگ در پروفایل مجاز است'});
+      if(Number(count.rows[0].n)>=3)return res.status(400).json({error:'حداکثر ۳ آهنگ در پروفایل مجاز است'});
       const stored=await uploadToStorage(req.file,'profile-songs',req.user.id);
       const pos=Number(count.rows[0].n);
       const r=await q("INSERT INTO profile_media(user_id,kind,url,name,mime,size,position) VALUES($1,'song',$2,$3,$4,$5,$6) RETURNING *",[req.user.id,stored.url,safeFileName(req.file.originalname),req.file.mimetype,req.file.size,pos]);
@@ -448,7 +448,8 @@ app.patch('/api/conversations/:id', auth, async (req, res) => {
     const cid = Number(req.params.id);
     const c = await getConversation(cid);
     if (!c || !['group','channel'].includes(c.type)) return res.status(404).json({ error: 'گروه یا کانال پیدا نشد' });
-    if (Number(c.owner_id) !== Number(req.user.id)) return res.status(403).json({ error: 'فقط مالک می‌تواند اطلاعات را ویرایش کند' });
+    const manager = await conversationManager(cid, req.user.id);
+    if (!manager.ok) return res.status(403).json({ error: manager.error });
     const name = String(req.body.name ?? c.name).trim().slice(0, 60);
     const username = String(req.body.username ?? c.username ?? '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 30);
     const description = String(req.body.description ?? c.description ?? '').trim().slice(0, 200);
@@ -649,24 +650,52 @@ app.get('/api/badges', auth, async (req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'دریافت نشان‌ها ناموفق بود'})}
 });
 
+async function conversationManager(cid, uid) {
+  const c = await getConversation(cid);
+  if (!c || !['group','channel'].includes(c.type)) return { ok:false, error:'گفتگو پیدا نشد' };
+  if (Number(c.owner_id) === Number(uid)) return { ok:true, owner:true, role:'owner', permissions:{manage:true,post:true,edit:true,delete:true,invite:true,ban:true} };
+  const ar = await q('SELECT role,permissions FROM conversation_admins WHERE conversation_id=$1 AND user_id=$2',[cid,uid]);
+  if (!ar.rowCount) return { ok:false, error:'فقط مالک یا ادمین دسترسی مدیریت دارد' };
+  const permissions=ar.rows[0].permissions||{};
+  if (permissions.manage===false) return { ok:false, error:'دسترسی مدیریت برای شما فعال نیست' };
+  return { ok:true, owner:false, role:'admin', permissions };
+}
+
 app.get('/api/conversations/:id/management', auth, async (req,res)=>{
   try{
     const cid=Number(req.params.id), c=await getConversation(cid); if(!c||!await isMember(cid,req.user.id))return res.status(404).json({error:'گفتگو پیدا نشد'});
+    const manager=await conversationManager(cid,req.user.id);
     const role=await q('SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);
     const admins=await q(`SELECT ca.user_id,ca.role,ca.permissions,u.username,u.display_name,u.avatar FROM conversation_admins ca JOIN users u ON u.id=ca.user_id WHERE ca.conversation_id=$1 ORDER BY ca.role,u.display_name`,[cid]);
-    res.json({conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)}))});
+    if(!manager.ok) return res.status(403).json({error:manager.error});
+    res.json({conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)})),canManage:true,isOwner:!!manager.owner,permissions:manager.permissions||{}});
   }catch(e){console.error(e);res.status(500).json({error:'مدیریت گفتگو در دسترس نیست'})}
 });
 
 app.put('/api/conversations/:id/management', auth, async (req,res)=>{
   try{
     const cid=Number(req.params.id), c=await getConversation(cid); if(!c||!['group','channel'].includes(c.type))return res.status(404).json({error:'گفتگو پیدا نشد'});
-    if(Number(c.owner_id)!==Number(req.user.id))return res.status(403).json({error:'فقط مالک می‌تواند تنظیمات را تغییر دهد'});
+    const manager=await conversationManager(cid,req.user.id);
+    if(!manager.ok)return res.status(403).json({error:manager.error});
     const incoming=req.body.settings && typeof req.body.settings==='object'?req.body.settings:{};
     const allowed={slowMode:!!incoming.slowMode,onlyAdminsPost:!!incoming.onlyAdminsPost,approval:!!incoming.approval,hideMembers:!!incoming.hideMembers,comments:!!incoming.comments};
     await q('UPDATE conversations SET settings=$1,updated_at=now() WHERE id=$2',[JSON.stringify(allowed),cid]);
     res.json({settings:allowed});
   }catch(e){console.error(e);res.status(500).json({error:'ذخیره تنظیمات ناموفق بود'})}
+});
+
+app.delete('/api/conversations/:id/members/:userId', auth, async (req,res)=>{
+  try {
+    const cid=Number(req.params.id), target=Number(req.params.userId), c=await getConversation(cid);
+    const manager=await conversationManager(cid,req.user.id);
+    if(!manager.ok)return res.status(403).json({error:manager.error});
+    if(target===Number(c.owner_id))return res.status(400).json({error:'مالک را نمی‌توان حذف کرد'});
+    if(target===Number(req.user.id))return res.status(400).json({error:'برای خروج از گفتگو از گزینه خروج استفاده کنید'});
+    await q('DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,target]);
+    await q('DELETE FROM conversation_admins WHERE conversation_id=$1 AND user_id=$2',[cid,target]);
+    io.to('conv:'+cid).emit('member_removed',{conversationId:cid,userId:target});
+    res.json({ok:true});
+  } catch(e){console.error(e);res.status(500).json({error:'حذف عضو ناموفق بود'})}
 });
 
 app.post('/api/conversations/:id/admins', auth, async (req,res)=>{
