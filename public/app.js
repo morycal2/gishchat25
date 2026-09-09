@@ -453,10 +453,46 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
   // ---- Zento Premium Profiles + Stories ----
   function ensureStoryModal(){
     if($('storyModal'))return;
-    const el=document.createElement('div');el.id='storyModal';el.className='story-modal hidden';el.innerHTML='<div class="story-shell"><button id="storyClose" class="story-close">×</button><div class="story-progress" id="storyProgress"></div><div id="storyStage" class="story-stage"></div><div class="story-top"><div id="storyUser" class="story-user"></div><div id="storyCounter" class="story-counter"></div></div><button id="storyPrev" class="story-nav story-prev">‹</button><button id="storyNext" class="story-nav story-next">›</button><div id="storyCaption" class="story-caption"></div></div>';document.body.appendChild(el);
-    $('storyClose').onclick=closeStories;$('storyPrev').onclick=()=>storyStep(-1);$('storyNext').onclick=()=>storyStep(1);el.addEventListener('click',e=>{if(e.target===el)closeStories()});
-    let downX=0,holdTimer=null;el.addEventListener('pointerdown',e=>{downX=e.clientX;clearTimeout(holdTimer);holdTimer=setTimeout(()=>{document.querySelectorAll('#storyProgress span.active').forEach(x=>x.classList.add('paused'));const v=$('storyStage')?.querySelector('video');if(v)v.pause()},220)});el.addEventListener('pointerup',e=>{clearTimeout(holdTimer);document.querySelectorAll('#storyProgress span.active').forEach(x=>x.classList.remove('paused'));const v=$('storyStage')?.querySelector('video');if(v&&v.paused)v.play().catch(()=>{});const dx=e.clientX-downX;if(Math.abs(dx)>70){if(dx>0)storyStep(-1);else storyStep(1)}});
+    const el=document.createElement('div');el.id='storyModal';el.className='story-modal hidden';el.innerHTML=`
+      <div class="story-shell" role="dialog" aria-modal="true" aria-label="تماشای استوری">
+        <div class="story-progress" id="storyProgress"></div>
+        <div id="storyStage" class="story-stage"></div>
+        <div class="story-vignette"></div>
+        <div class="story-topbar">
+          <button id="storyClose" class="story-icon-btn story-close" aria-label="بستن">×</button>
+          <div id="storyUser" class="story-user"></div>
+          <div class="story-top-actions">
+            <button id="storyMute" class="story-icon-btn" aria-label="صدا">🔊</button>
+            <button id="storyMore" class="story-icon-btn" aria-label="بیشتر">⋮</button>
+          </div>
+        </div>
+        <div id="storyCounter" class="story-counter"></div>
+        <button id="storyPrev" class="story-nav story-prev" aria-label="قبلی">‹</button>
+        <button id="storyNext" class="story-nav story-next" aria-label="بعدی">›</button>
+        <div class="story-bottom">
+          <div id="storyCaption" class="story-caption"></div>
+          <div class="story-reply-row">
+            <button id="storyReply" class="story-reply-box" type="button"><span>پاسخ خصوصی...</span></button>
+            <button id="storyHeart" class="story-action-btn" aria-label="پسندیدن">♡</button>
+            <button id="storyReact" class="story-action-btn" aria-label="واکنش">☺</button>
+            <button id="storyVoiceReply" class="story-action-btn" aria-label="پیام صوتی">🎙</button>
+          </div>
+        </div>
+      </div>`;document.body.appendChild(el);
+    $('storyClose').onclick=closeStories;$('storyPrev').onclick=()=>storyStep(-1);$('storyNext').onclick=()=>storyStep(1);
+    $('storyMute').onclick=()=>{const v=$('storyStage')?.querySelector('video');if(!v)return;v.muted=!v.muted;$('storyMute').textContent=v.muted?'🔇':'🔊'};
+    $('storyMore').onclick=()=>{const g=storyGroups[storyUserIndex];const st=g?.stories?.[storyItemIndex];if(!st)return;openModal('⋮ گزینه‌های استوری',`<div class="story-more-menu"><button id="storyMoreReport">🚩 گزارش استوری</button><button id="storyMoreProfile">👤 مشاهده پروفایل</button></div>`,()=>{});$('modalOk').classList.add('hidden');$('modalCancel').textContent='بستن';$('storyMoreProfile').onclick=()=>{closeModal();closeStories();openUserProfile(Number(g.user_id))};$('storyMoreReport').onclick=()=>{closeModal();showToast('گزارش استوری ثبت شد ✓')}};
+    $('storyReply').onclick=()=>{const g=storyGroups[storyUserIndex];if(!g)return;closeStories();openUserProfile(Number(g.user_id));};
+    $('storyHeart').onclick=()=>{const b=$('storyHeart');b.classList.toggle('liked');b.textContent=b.classList.contains('liked')?'♥':'♡'};
+    $('storyReact').onclick=()=>showToast('واکنش‌ها به‌زودی ارسال می‌شوند');
+    $('storyVoiceReply').onclick=()=>showToast('برای پاسخ صوتی وارد گفتگوی کاربر شوید');
+    el.addEventListener('click',e=>{if(e.target===el)closeStories()});
+    let downX=0,downY=0,holdTimer=null;
+    el.addEventListener('pointerdown',e=>{if(e.target.closest('button,.story-topbar,.story-bottom'))return;downX=e.clientX;downY=e.clientY;clearTimeout(holdTimer);holdTimer=setTimeout(()=>pauseStory(true),220)});
+    el.addEventListener('pointerup',e=>{if(e.target.closest('button,.story-topbar,.story-bottom'))return;clearTimeout(holdTimer);resumeStory();const dx=e.clientX-downX,dy=e.clientY-downY;if(dy>100&&Math.abs(dx)<100){closeStories();return}if(Math.abs(dx)>70){if(dx>0)storyStep(-1);else storyStep(1)}});
   }
+  function pauseStory(){document.querySelectorAll('#storyProgress span.active').forEach(x=>x.classList.add('paused'));const v=$('storyStage')?.querySelector('video');if(v)v.pause();if(window.__storyPausedAt)clearTimeout(window.__storyPausedAt);}
+  function resumeStory(){document.querySelectorAll('#storyProgress span.active').forEach(x=>x.classList.remove('paused'));const v=$('storyStage')?.querySelector('video');if(v&&v.paused)v.play().catch(()=>{});}
   let storyGroups=[],storyUserIndex=0,storyItemIndex=0,storyTimer=null;
   async function loadStories(){try{storyGroups=await api('/api/stories/feed');return storyGroups}catch{storyGroups=[];return []}}
   function storyRing(u,cls='story-avatar-ring'){const has=!!u?.has_unseen||!!u?.stories?.length;return `<span class="${cls} ${has?'has-story':''}">${avatar(u,'avatar')}</span>`}
@@ -470,7 +506,17 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
   window.renderStoriesStrip=renderStoriesStrip;
   async function openStories(preferredUserId=null){ensureStoryModal();await loadStories();if(!storyGroups.length){openStoryComposer();return}let idx=preferredUserId?storyGroups.findIndex(x=>Number(x.user_id)===Number(preferredUserId)):0;if(idx<0)idx=0;storyUserIndex=idx;storyItemIndex=0;renderStory();$('storyModal').classList.remove('hidden');$('storyModal').setAttribute('aria-hidden','false')}
   function closeStories(){if(!$('storyModal'))return;clearTimeout(storyTimer);$('storyModal').classList.add('hidden');$('storyModal').setAttribute('aria-hidden','true');const v=$('storyStage')?.querySelector('video');if(v)v.pause()}
-  function renderStory(){const g=storyGroups[storyUserIndex];if(!g)return closeStories();const st=g.stories[storyItemIndex];if(!st)return storyStep(1);const stage=$('storyStage');stage.innerHTML=st.kind==='video'?`<video src="${esc(backendUrl(st.url))}" autoplay playsinline></video>`:`<img src="${esc(backendUrl(st.url))}" alt="استوری">`;if(st.text)$('storyCaption').textContent=st.text;else $('storyCaption').textContent='';$('storyUser').innerHTML=`${avatar(g,'avatar small-avatar')}<div><b>${esc(g.display_name)}</b><small>@${esc(g.username)}</small></div>`;$('storyCounter').textContent=`${storyItemIndex+1} / ${g.stories.length}`;$('storyProgress').innerHTML=g.stories.map((_,i)=>`<span class="${i===storyItemIndex?'active':''}"><i></i></span>`).join('');api(`/api/stories/${st.id}/view`,{method:'POST'}).catch(()=>{});clearTimeout(storyTimer);const v=stage.querySelector('video');if(v){v.onloadedmetadata=()=>{const dur=Math.min(45,Math.max(1,v.duration||Number(st.duration_seconds)||45));const bar=$('storyProgress').querySelector('.active i');if(bar)bar.style.animationDuration=dur+'s';v.play().catch(()=>{});};v.ontimeupdate=()=>{if(v.duration>45&&v.currentTime>=45){v.pause();storyStep(1)}};v.onended=()=>storyStep(1);v.onclick=()=>v.paused?v.play():v.pause()}else{const dur=10;const bar=$('storyProgress').querySelector('.active i');if(bar)bar.style.animationDuration=dur+'s';storyTimer=setTimeout(()=>storyStep(1),dur*1000)}}
+  function renderStory(){
+    const g=storyGroups[storyUserIndex];if(!g)return closeStories();const st=g.stories[storyItemIndex];if(!st)return storyStep(1);
+    const stage=$('storyStage');clearTimeout(storyTimer);stage.innerHTML=st.kind==='video'?`<video src="${esc(backendUrl(st.url))}" autoplay playsinline preload="metadata"></video>`:`<img src="${esc(backendUrl(st.url))}" alt="استوری">`;
+    $('storyCaption').textContent=st.text||'';$('storyUser').innerHTML=`${avatar(g,'avatar small-avatar')}<div><b>${esc(g.display_name)}</b><small>@${esc(g.username||'')}</small></div>`;
+    $('storyCounter').textContent=`${storyItemIndex+1} / ${g.stories.length}`;$('storyMute').textContent='🔊';$('storyHeart').textContent='♡';$('storyHeart').classList.remove('liked');
+    $('storyProgress').innerHTML=g.stories.map((_,i)=>`<span class="${i<storyItemIndex?'done ':''}${i===storyItemIndex?'active':''}"><i></i></span>`).join('');
+    api(`/api/stories/${st.id}/view`,{method:'POST'}).catch(()=>{});
+    const v=stage.querySelector('video');
+    if(v){v.onloadedmetadata=()=>{const dur=Math.min(45,Math.max(1,v.duration||Number(st.duration_seconds)||45));const bar=$('storyProgress').querySelector('.active i');if(bar){bar.style.animationDuration=dur+'s';bar.style.animationPlayState='running'}v.muted=false;$('storyMute').textContent='🔊';v.play().catch(()=>{});};v.ontimeupdate=()=>{if(v.currentTime>=45){v.pause();storyStep(1)}};v.onended=()=>storyStep(1)}
+    else{const dur=10;const bar=$('storyProgress').querySelector('.active i');if(bar){bar.style.animationDuration=dur+'s';bar.style.animationPlayState='running'}storyTimer=setTimeout(()=>storyStep(1),dur*1000)}
+  }
   function storyStep(dir){const g=storyGroups[storyUserIndex];if(!g)return;if(storyItemIndex+dir>=0&&storyItemIndex+dir<g.stories.length){storyItemIndex+=dir;renderStory();return}let ni=storyUserIndex+dir;if(ni<0)ni=storyGroups.length-1;if(ni>=storyGroups.length)return closeStories();storyUserIndex=ni;storyItemIndex=dir>0?0:storyGroups[ni].stories.length-1;renderStory()}
   async function openStoryComposer(){
     const people=Array.from(new Map(convs.filter(c=>c.type==='direct').flatMap(c=>(c.members||[])).filter(x=>Number(x.id)!==Number(me.id)).map(x=>[Number(x.id),x])).values());
