@@ -28,6 +28,7 @@ function refreshUserUI(){
   const profileUsername=$('profileUsername'); if(profileUsername && document.activeElement!==profileUsername)profileUsername.value=me.username||'';
   const profileBio=$('profileBio'); if(profileBio && document.activeElement!==profileBio)profileBio.value=me.bio||'';
 }
+window.refreshUserUI=refreshUserUI;
 function showAuth(){$('auth').classList.remove('hidden');$('app').classList.add('hidden')}function showApp(){$('auth').classList.add('hidden');$('app').classList.remove('hidden')}
 function enterChatView(){document.getElementById('app')?.classList.add('chat-open')}
 function leaveChatView(){const app=document.getElementById('app');app?.classList.remove('chat-open');current=null;document.getElementById('chatTitle')?.replaceChildren(document.createTextNode('زنتو'));document.getElementById('chatStatus')?.replaceChildren(document.createTextNode('یک گفتگو را انتخاب کنید'));document.getElementById('messages')?.replaceChildren(Object.assign(document.createElement('div'),{className:'empty',innerHTML:'<div class="empty-icon">✈</div><b>زنتو</b><span>یک گفتگو را از فهرست انتخاب کن</span>'}));renderConvs?.()}
@@ -368,14 +369,14 @@ function stage1Style(){if(document.getElementById('stage1-style'))return;const s
 async function stage1Load(){try{const p=await api('/api/preferences');stage1ApplyTheme(p.theme)}catch{}try{stage1Folders=await api('/api/folders')}catch{stage1Folders=[]}try{stage1Profiles=await api('/api/profiles')}catch{stage1Profiles=[]}if(stage1Profiles.length)stage1Profiles.forEach(p=>{if(p.is_default)stage1ProfileByConv._default=p.id});stage1RenderFolders()}
 function ensureStoryBar(){return $('storyTopBar')}
 async function renderStoryTopBar(){
-  let groups=[];try{groups=await loadStories()}catch{}
+  let groups=[];try{groups=await (window.loadStories?window.loadStories():[])}catch{}
   const html=`<button class="story-top-card mine" id="storyTopAdd" type="button"><span class="story-top-add-ring">＋</span><span>استوری من</span></button>`+
-    groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${storyRing(g,'story-top-ring')}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');
+    groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${window.storyRing?window.storyRing(g,'story-top-ring'):''}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');
   [$('storyTopBar'),$('chatStoryTopBar')].filter(Boolean).forEach(b=>{
     b.innerHTML=html;
     b.classList.add('story-bar-ready');
-    b.querySelector('#storyTopAdd')?.addEventListener('click',openStoryComposer);
-    b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>openStories(Number(x.dataset.storyUser)));
+    b.querySelector('#storyTopAdd')?.addEventListener('click',()=>window.openStoryComposer?.());
+    b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>window.openStories?.(Number(x.dataset.storyUser)));
   });
 }
 function stage1EnsureFolderBar(){let b=$('stage1Folders');if(!b&&$('chats')){ $('chats').insertAdjacentHTML('beforebegin','<div id="stage1Folders" class="stage1-folders"></div>');b=$('stage1Folders')}return b}
@@ -386,7 +387,7 @@ function stage1RenderConvs(){convs.forEach(c=>{if(c._settingsLoaded)return;c._se
 const _baseStage1RenderConvs=stage1RenderConvs;
 stage1RenderConvs=function(){_baseStage1RenderConvs();renderStoryTopBar().catch(e=>console.warn('stories',e));};
 renderConvs=stage1RenderConvs;
-const originalOpenConv=openConv;
+let originalOpenConv=openConv;
 const _zentoOpenConvWithStories=originalOpenConv;
 originalOpenConv=async function(id){const r=await _zentoOpenConvWithStories(id);setTimeout(()=>renderStoryTopBar().catch(()=>{}),80);return r};
 async function stage1OpenConv(id){const c=convs.find(x=>Number(x.id)===Number(id));if(!c)return;try{const st=await api('/api/conversations/'+id+'/lock');c.stage1Locked=!!st.locked;if(st.locked){const pin=prompt('🔐 این گفتگو قفل است. PIN را وارد کنید:');if(pin===null)return;await api('/api/conversations/'+id+'/unlock',{method:'POST',body:JSON.stringify({pin})})}}catch(e){showToast(e.message,true);return}try{const p=await api('/api/conversations/'+id+'/profile');if(p)stage1ProfileByConv[id]=p.id}catch{}return originalOpenConv(id)}
@@ -654,6 +655,10 @@ function openStoryReplyComposer(st,g){
 }
   function storyStep(dir){const g=storyGroups[storyUserIndex];if(!g)return;if(storyItemIndex+dir>=0&&storyItemIndex+dir<g.stories.length){storyItemIndex+=dir;renderStory();return}let ni=storyUserIndex+dir;if(ni<0)ni=storyGroups.length-1;if(ni>=storyGroups.length)return closeStories();storyUserIndex=ni;storyItemIndex=dir>0?0:storyGroups[ni].stories.length-1;renderStory()}
   async function openStoryComposer(){openModal('📸 استوری جدید',`<div class="story-composer"><div class="story-composer-hero">عکس یا ویدیوی کوتاه خودت را برای ۲۴ ساعت منتشر کن.</div><label>رسانه<input id="storyFile" type="file" accept="image/*,video/mp4,video/webm,video/quicktime" required></label><label>متن روی استوری<input id="storyText" maxlength="500" placeholder="یک کپشن کوتاه…"></label></div>`,async()=>{const f=$('storyFile').files[0];if(!f)return showToast('یک عکس یا ویدیو انتخاب کن',true);const fd=new FormData();fd.append('story',f);fd.append('text',$('storyText').value||'');await api('/api/stories',{method:'POST',body:fd});closeModal();showToast('استوری منتشر شد ✓');loadStories()});$('modalOk').textContent='انتشار' }
+  window.loadStories=loadStories;
+  window.storyRing=storyRing;
+  window.openStories=openStories;
+  window.openStoryComposer=openStoryComposer;
   async function openStoriesPanel(){ensureStoryModal();const groups=await loadStories();const cards=groups.map(g=>`<button class="story-person ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}">${storyRing(g)}<span><b>${esc(g.display_name)}</b><small>${g.stories.length} استوری</small></span></button>`).join('');openModal('📸 استوری‌ها',`<div class="stories-list"><button id="newStoryBtn" class="story-add-card">＋ افزودن استوری</button>${cards||'<div class="empty">هنوز استوری فعالی نیست.</div>'}</div>`,()=>{});$('modalOk').classList.add('hidden');$('modalCancel').textContent='بستن';$('newStoryBtn').onclick=()=>{closeModal();openStoryComposer()};document.querySelectorAll('[data-story-user]').forEach(b=>b.onclick=()=>{closeModal();openStories(Number(b.dataset.storyUser))})}
   async function enhanceProfileData(u){const p=u||{};if(!p.photos||!p.songs||!p.stories){try{const r=await api('/api/public/users/'+encodeURIComponent(p.username)+'/profile');return r}catch{return p}}return p}
   function profileLink(u){return `${location.origin}/#/user/${encodeURIComponent(u.username)}`}
