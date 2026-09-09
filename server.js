@@ -657,6 +657,12 @@ io.on('connection', async socket => {
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
+  // Lightweight mesh conference signaling for small groups/channels. Media stays peer-to-peer; server only relays SDP/ICE.
+  socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
+  socket.on('conference:offer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
+  socket.on('conference:answer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:answer',{room,from:uid,answer:d.answer}); });
+  socket.on('conference:ice', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:ice',{room,from:uid,candidate:d.candidate}); });
+  socket.on('conference:leave', d => { const room=String(d.room||''); socket.leave(room); socket.to(room).emit('conference:peer-left',{room,userId:uid}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
