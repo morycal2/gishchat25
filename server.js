@@ -667,8 +667,11 @@ app.get('/api/conversations/:id/management', auth, async (req,res)=>{
     const manager=await conversationManager(cid,req.user.id);
     const role=await q('SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);
     const admins=await q(`SELECT ca.user_id,ca.role,ca.permissions,u.username,u.display_name,u.avatar FROM conversation_admins ca JOIN users u ON u.id=ca.user_id WHERE ca.conversation_id=$1 ORDER BY ca.role,u.display_name`,[cid]);
-    if(!manager.ok) return res.status(403).json({error:manager.error});
-    res.json({conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)})),canManage:true,isOwner:!!manager.owner,permissions:manager.permissions||{}});
+    const base={conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)})),canManage:!!manager.ok,isOwner:!!manager.owner,permissions:manager.permissions||{}};
+    // A normal member gets a successful capability response so the client can simply hide management UI;
+    // this avoids noisy 403/404 console errors while keeping all write operations protected server-side.
+    if(!manager.ok) return res.json(base);
+    res.json(base);
   }catch(e){console.error(e);res.status(500).json({error:'مدیریت گفتگو در دسترس نیست'})}
 });
 
