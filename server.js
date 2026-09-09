@@ -481,22 +481,27 @@ app.get('/api/public/users/:username/profile', auth, async (req,res)=>{
   if(!ur.rowCount)return res.status(404).json({error:'کاربر پیدا نشد'});
   const id=Number(ur.rows[0].id);
   const media=await q('SELECT id,kind,url,name,mime,position FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[id]);
-  const stories=await q(`SELECT s.id,s.kind,s.url,s.text,s.created_at,s.expires_at,s.visibility_mode,s.visibility_user_ids
-    FROM stories s WHERE s.user_id=$1 AND s.expires_at>now() AND (s.visibility_mode='everyone' OR (s.visibility_mode='everyone_except' AND NOT ($2=ANY(COALESCE(s.visibility_user_ids,'{}'::bigint[])))) OR (s.visibility_mode='nobody_except' AND $2=ANY(COALESCE(s.visibility_user_ids,'{}'::bigint[]))) OR (s.visibility_mode='nobody' AND s.user_id=$2) ORDER BY s.created_at DESC`,[id,req.user.id]);
+  const stories=await q(`SELECT s.id,s.kind,s.url,s.text,s.created_at,s.expires_at
+    FROM stories s WHERE s.user_id=$1 AND s.expires_at>now() ORDER BY s.created_at DESC`,[id]);
   res.json({...safeUser(ur.rows[0]),photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),stories:stories.rows.map(x=>({...x,id:Number(x.id)}))});
 });
 app.get('/api/stories/feed', auth, async (req,res)=>{
-  const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,s.visibility_mode,s.visibility_user_ids,
-      u.username,u.display_name,u.avatar,
-      EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed
-    FROM stories s JOIN users u ON u.id=s.user_id
-    WHERE s.expires_at>now()
-      AND (s.user_id=$1 OR EXISTS(SELECT 1 FROM conversation_members cm1 JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id))
-      AND (s.user_id=$1 OR s.visibility_mode='everyone' OR (s.visibility_mode='everyone_except' AND NOT ($1=ANY(COALESCE(s.visibility_user_ids,'{}'::bigint[])))) OR (s.visibility_mode='nobody_except' AND $1=ANY(COALESCE(s.visibility_user_ids,'{}'::bigint[]))))
-    ORDER BY s.created_at ASC`,[req.user.id]);
-  const grouped=new Map();
-  for(const x of r.rows){if(!grouped.has(x.user_id))grouped.set(x.user_id,{user_id:Number(x.user_id),username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(x.user_id);g.stories.push({...x,id:Number(x.id),user_id:Number(x.user_id)});if(!x.viewed)g.has_unseen=true}
-  res.json([...grouped.values()]);
+  try{
+    const uid=Number(req.user.id);
+    const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,
+        u.username,u.display_name,u.avatar,
+        EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed
+      FROM stories s JOIN users u ON u.id=s.user_id
+      WHERE s.expires_at>now() AND (s.user_id=$1 OR EXISTS(
+        SELECT 1 FROM conversation_members cm1
+        JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id
+        WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id
+      ))
+      ORDER BY s.created_at ASC`,[uid]);
+    const grouped=new Map();
+    for(const x of r.rows){const key=Number(x.user_id);if(!grouped.has(key))grouped.set(key,{user_id:key,username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(key);g.stories.push({...x,id:Number(x.id),user_id:key});if(!x.viewed)g.has_unseen=true;}
+    res.json([...grouped.values()]);
+  }catch(e){console.error('stories/feed',e);res.status(500).json({error:'فید استوری در دسترس نیست'});}
 });
 app.post('/api/stories', auth, (req,res)=>{
   upload.single('story')(req,res,async err=>{try{
@@ -506,11 +511,7 @@ app.post('/api/stories', auth, (req,res)=>{
     if(Number(active.rows[0].n)>=20)return res.status(400).json({error:'حداکثر ۲۰ استوری فعال مجاز است'});
     const stored=await uploadToStorage(req.file,'stories',req.user.id);
     const text=String(req.body.text||'').trim().slice(0,500);
-    const mode=['everyone','nobody','everyone_except','nobody_except'].includes(String(req.body.visibility_mode||''))?String(req.body.visibility_mode):'everyone';
-    let ids=[]; try{const raw=JSON.parse(req.body.visibility_user_ids||'[]'); if(Array.isArray(raw)) ids=[...new Set(raw.map(Number).filter(n=>Number.isInteger(n)&&n>0&&n!==Number(req.user.id)))].slice(0,200)}catch{}
-    const duration=Math.min(45,Math.max(0,Number(req.body.duration||0)));
-    if(req.file.mimetype.startsWith('video/') && (!duration || duration>45)) return res.status(400).json({error:'مدت ویدیو باید حداکثر ۴۵ ثانیه باشد'});
-    const r=await q(`INSERT INTO stories(user_id,kind,url,text,expires_at,visibility_mode,visibility_user_ids,duration_seconds) VALUES($1,$2,$3,$4,now()+interval '24 hours',$5,$6,$7) RETURNING *`,[req.user.id,req.file.mimetype.startsWith('video/')?'video':'photo',stored.url,text,mode,ids,duration]);
+    const r=await q(`INSERT INTO stories(user_id,kind,url,text,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours') RETURNING *`,[req.user.id,req.file.mimetype.startsWith('video/')?'video':'photo',stored.url,text]);
     res.json({...r.rows[0],id:Number(r.rows[0].id),user_id:Number(r.rows[0].user_id)});
   }catch(e){console.error(e);res.status(500).json({error:'ساخت استوری ناموفق بود'})}})
 });
@@ -613,7 +614,6 @@ io.on('connection', async socket => {
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
-  socket.on('call:invite', d => { const to=Number(d.to); if(!to||to===uid)return; io.to('user:'+to).emit('call:invite',{from:uid,video:!!d.video,conversationId:d.fromConversation||null}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
@@ -672,11 +672,8 @@ app.get('/api/conversations/:id/management', auth, async (req,res)=>{
     const manager=await conversationManager(cid,req.user.id);
     const role=await q('SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);
     const admins=await q(`SELECT ca.user_id,ca.role,ca.permissions,u.username,u.display_name,u.avatar FROM conversation_admins ca JOIN users u ON u.id=ca.user_id WHERE ca.conversation_id=$1 ORDER BY ca.role,u.display_name`,[cid]);
-    const base={conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)})),canManage:!!manager.ok,isOwner:!!manager.owner,permissions:manager.permissions||{}};
-    // A normal member gets a successful capability response so the client can simply hide management UI;
-    // this avoids noisy 403/404 console errors while keeping all write operations protected server-side.
-    if(!manager.ok) return res.json(base);
-    res.json(base);
+    if(!manager.ok) return res.status(403).json({error:manager.error});
+    res.json({conversation:{id:Number(c.id),name:c.name,type:c.type,description:c.description,username:c.username,photo:c.photo||'',settings:c.settings||{}},role:role.rows[0]?.role||'member',owner_id:c.owner_id?Number(c.owner_id):null,admins:admins.rows.map(a=>({...a,user_id:Number(a.user_id)})),canManage:true,isOwner:!!manager.owner,permissions:manager.permissions||{}});
   }catch(e){console.error(e);res.status(500).json({error:'مدیریت گفتگو در دسترس نیست'})}
 });
 
@@ -865,12 +862,6 @@ async function ensureStage5Schema(){
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL
   )`);
-  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS visibility_mode TEXT NOT NULL DEFAULT 'everyone'`);
-  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS visibility_user_ids BIGINT[] NOT NULL DEFAULT '{}'::bigint[]`);
-  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS duration_seconds NUMERIC NOT NULL DEFAULT 0`);
-  await q(`CREATE INDEX IF NOT EXISTS stories_visibility_idx ON stories(user_id,visibility_mode,expires_at)`);
-  await q(`ALTER TABLE stories DROP CONSTRAINT IF EXISTS stories_visibility_mode_chk`);
-  await q(`ALTER TABLE stories ADD CONSTRAINT stories_visibility_mode_chk CHECK (visibility_mode IN ('everyone','nobody','everyone_except','nobody_except'))`);
   await q(`CREATE TABLE IF NOT EXISTS story_views (
     story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
     viewer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
