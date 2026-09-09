@@ -12,6 +12,22 @@ const CALL_ICE=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google
 function showToast(msg,error=false){const t=$('toast');t.textContent=msg;t.className='toast show'+(error?' error':'');clearTimeout(showToast.t);showToast.t=setTimeout(()=>t.className='toast',4200)}
 window.addEventListener('error',e=>{if(e?.error?.message)showToast(e.error.message,true)});
 function api(url,opt={}){opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};if(opt.body&&!(opt.body instanceof FormData))opt.headers['Content-Type']='application/json';return fetch(backendUrl(url),opt).then(async r=>{const ct=r.headers.get('content-type')||'';const d=ct.includes('application/json')?await r.json().catch(()=>({})):{};if(!r.ok)throw Error(d.error||`خطا (${r.status})`);return d})}
+function refreshUserUI(){
+  if(!me)return;
+  const name=me.display_name||me.name||'کاربر';
+  const username=me.username?('@'+me.username):'';
+  const dn=$('drawerName'); if(dn)dn.textContent=name;
+  const du=$('drawerUser'); if(du)du.textContent=username;
+  const avatarEl=$('drawerAvatar');
+  if(avatarEl){
+    if(me.avatar) avatarEl.innerHTML=`<img src="${esc(backendUrl(me.avatar))}" alt="">`;
+    else avatarEl.textContent=(name[0]||'گ');
+  }
+  const profileUser=$('profileUser'); if(profileUser)profileUser.textContent=username;
+  const profileName=$('profileName'); if(profileName && document.activeElement!==profileName)profileName.value=name;
+  const profileUsername=$('profileUsername'); if(profileUsername && document.activeElement!==profileUsername)profileUsername.value=me.username||'';
+  const profileBio=$('profileBio'); if(profileBio && document.activeElement!==profileBio)profileBio.value=me.bio||'';
+}
 function showAuth(){$('auth').classList.remove('hidden');$('app').classList.add('hidden')}function showApp(){$('auth').classList.add('hidden');$('app').classList.remove('hidden')}
 function closeDrawer(){$('drawer').classList.remove('open');$('drawerShade').classList.add('hidden');$('sidebar').classList.remove('open')}
 function openDrawer(){$('drawer').classList.add('open');$('drawerShade').classList.remove('hidden')}
@@ -31,7 +47,7 @@ function connectSocket(){
  installCallHandlers();
 }
 async function loadSettings(){try{settings=await api('/api/settings')}catch{settings={notifications:{messages:true,sounds:true,previews:true},data_usage:{autoplay:true,autoDownloadImages:true,autoDownloadVideos:false,autoDownloadAudio:false},privacy:{lastSeen:'everyone',profilePhoto:'everyone',readReceipts:true},security:{twoStep:false}}}}
-async function loadConvs(){convs=await api('/api/conversations');renderConvs();await handleJoinHash()}
+async function loadConvs(){convs=await api('/api/conversations');renderConvs();renderStoryTopBar().catch(e=>console.warn('stories',e));await handleJoinHash()}
 async function handleJoinHash(){const m=location.hash.match(/^#\/join\/([^/]+)$/);if(!m)return;try{const info=await api('/api/public/conversations/'+encodeURIComponent(m[1]));const c=await api('/api/conversations/'+info.id+'/join',{method:'POST'});await loadConvs();openConv(c.id);history.replaceState(null,'',location.pathname+location.search)}catch(e){showToast(e.message,true)}}
 async function stage2HandleMessageHash(){
   if(!token)return;
@@ -275,8 +291,9 @@ function stage1RenderFolders(){const b=stage1EnsureFolderBar();if(!b)return;cons
 async function stage1AddConversationsToFolder(folder){if(!folder)return;const available=convs.filter(c=>!(folder.conversations||[]).map(Number).includes(Number(c.id)));if(!available.length)return showToast('همه گفتگوها داخل این پوشه هستند');openModal('➕ افزودن گفتگو به پوشه',`<div class="folder-add-head"><b>${esc(folder.icon||'📁')} ${esc(folder.name)}</b><small>گفتگوهایی را که می‌خواهی به این پوشه اضافه شوند انتخاب کن.</small></div><div class="folder-conversation-picks">${available.map(c=>{const other=c.type==='direct'?c.members.find(x=>Number(x.id)!==Number(me.id)):null;const title=c.type==='direct'?(other?.display_name||'گفتگو'):c.name;return `<label class="folder-conversation-item"><input type="checkbox" value="${c.id}"><span>${c.type==='direct'?avatar(other,'avatar tiny-avatar'):`<span class="avatar tiny-avatar">${c.type==='channel'?'📢':'👥'}</span>`}</span><span><b>${esc(title)}</b><small>${c.type==='direct'?'@'+esc(other?.username||''):c.type==='group'?'گروه':'کانال'}</small></span></label>`}).join('')}</div>`,async()=>{const ids=[...document.querySelectorAll('.folder-conversation-picks input:checked')].map(x=>Number(x.value));if(!ids.length)return showToast('حداقل یک گفتگو انتخاب کن');for(const cid of ids)await api(`/api/folders/${folder.id}/conversations/${cid}`,{method:'POST'});stage1Folders=await api('/api/folders');stage1RenderFolders();stage1RenderConvs();closeModal();showToast(`${ids.length} گفتگو به پوشه اضافه شد ✓`)});$('modalOk').textContent='افزودن';}
 
 function stage1RenderConvs(){convs.forEach(c=>{if(c._settingsLoaded)return;c._settingsLoaded=true;api(`/api/conversations/${c.id}/user-settings`).then(s=>{c._pinned=!!s.pinned;c._muted=!!s.muted;c._archived=!!s.archived;stage1RenderConvs()}).catch(()=>{})});const visibleConvs=convs.filter(c=>!c._archived);const base=stage1Folder==='all'?visibleConvs:visibleConvs.filter(c=>{const f=stage1Folders.find(x=>String(x.id)===String(stage1Folder));return f?.conversations?.map(Number).includes(Number(c.id))});const list=(activeFilter==='all'?base:base.filter(c=>c.type===activeFilter)).sort((a,b)=>Number(!!b._pinned)-Number(!!a._pinned));$('chats').innerHTML=list.map(c=>{const other=c.type==='direct'?c.members.find(x=>Number(x.id)!==Number(me.id)):null;const title=c.type==='direct'?(other?.display_name||'گفتگو'):c.name;const icon=c.type==='channel'?'📢':c.type==='group'?'👥':'گ';const locked=c.stage1Locked?' 🔐':'';return `<button class="chat-item ${current&&Number(current.id)===Number(c.id)?'active':''}" data-id="${c.id}">${c.type==='direct'?avatar(other):`<div class="avatar">${icon}</div>`}<div class="ci"><b>${c._pinned?'📌 ':''}${esc(title)}${locked}${c._muted?' 🔇':''}</b><small>${c.type==='channel'?'کانال':c.type==='group'?`${c.members.length} عضو`:'@'+esc(other?.username||'')} · ${esc(c.last_text||'')}</small></div><span class="type-badge">${c.unread_count>0?`<b class="unread-badge">${c.unread_count>99?'99+':c.unread_count}</b>`:''}${c.type==='channel'?'کانال':c.type==='group'?'گروه':'خصوصی'}</span></button>`}).join('')||'<div class="empty"><span>گفتگویی پیدا نشد</span></div>'}
+const _baseStage1RenderConvs=stage1RenderConvs;
+stage1RenderConvs=function(){_baseStage1RenderConvs();renderStoryTopBar().catch(e=>console.warn('stories',e));};
 renderConvs=stage1RenderConvs;
-const _oldStage1Render=stage1RenderConvs; stage1RenderConvs=function(){_oldStage1Render();renderStoryTopBar().catch(()=>{})};
 const originalOpenConv=openConv;
 async function stage1OpenConv(id){const c=convs.find(x=>Number(x.id)===Number(id));if(!c)return;try{const st=await api('/api/conversations/'+id+'/lock');c.stage1Locked=!!st.locked;if(st.locked){const pin=prompt('🔐 این گفتگو قفل است. PIN را وارد کنید:');if(pin===null)return;await api('/api/conversations/'+id+'/unlock',{method:'POST',body:JSON.stringify({pin})})}}catch(e){showToast(e.message,true);return}try{const p=await api('/api/conversations/'+id+'/profile');if(p)stage1ProfileByConv[id]=p.id}catch{}return originalOpenConv(id)}
 openConv=stage1OpenConv;
