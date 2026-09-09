@@ -486,25 +486,17 @@ app.get('/api/public/users/:username/profile', auth, async (req,res)=>{
   res.json({...safeUser(ur.rows[0]),photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),stories:stories.rows.map(x=>({...x,id:Number(x.id)}))});
 });
 app.get('/api/stories/feed', auth, async (req,res)=>{
-  try{
-    const uid=Number(req.user.id);
-    const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,
-        u.username,u.display_name,u.avatar,
-        EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed,
-        (SELECT count(*)::int FROM story_views sv2 WHERE sv2.story_id=s.id) AS view_count,
-        (SELECT count(*)::int FROM story_reactions sr2 WHERE sr2.story_id=s.id) AS like_count,
-        EXISTS(SELECT 1 FROM story_reactions sr3 WHERE sr3.story_id=s.id AND sr3.user_id=$1) AS liked
-      FROM stories s JOIN users u ON u.id=s.user_id
-      WHERE s.expires_at>now() AND (s.user_id=$1 OR EXISTS(
-        SELECT 1 FROM conversation_members cm1
-        JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id
-        WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id
-      ))
-      ORDER BY s.created_at ASC`,[uid]);
-    const grouped=new Map();
-    for(const x of r.rows){const key=Number(x.user_id);if(!grouped.has(key))grouped.set(key,{user_id:key,username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(key);g.stories.push({...x,id:Number(x.id),user_id:key});if(!x.viewed)g.has_unseen=true;}
-    res.json([...grouped.values()]);
-  }catch(e){console.error('stories/feed',e);res.status(500).json({error:'فید استوری در دسترس نیست'});}
+  const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,
+      u.username,u.display_name,u.avatar,
+      EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed, (SELECT count(*) FROM story_views vx WHERE vx.story_id=s.id) AS view_count, (SELECT count(*) FROM story_reactions rx WHERE rx.story_id=s.id) AS reaction_count, EXISTS(SELECT 1 FROM story_reactions rm WHERE rm.story_id=s.id AND rm.user_id=$1) AS reacted
+    FROM stories s JOIN users u ON u.id=s.user_id
+    WHERE s.expires_at>now() AND (s.user_id=$1 OR EXISTS(
+      SELECT 1 FROM conversation_members cm1 JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id
+      WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id))
+    ORDER BY s.created_at ASC`,[req.user.id]);
+  const grouped=new Map();
+  for(const x of r.rows){if(!grouped.has(x.user_id))grouped.set(x.user_id,{user_id:Number(x.user_id),username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(x.user_id);g.stories.push({...x,id:Number(x.id),user_id:Number(x.user_id)});if(!x.viewed)g.has_unseen=true}
+  res.json([...grouped.values()]);
 });
 app.post('/api/stories', auth, (req,res)=>{
   upload.single('story')(req,res,async err=>{try{
@@ -519,11 +511,11 @@ app.post('/api/stories', auth, (req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'ساخت استوری ناموفق بود'})}})
 });
 app.post('/api/stories/:id/view', auth, async(req,res)=>{const id=Number(req.params.id);const ok=await q('SELECT 1 FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!ok.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});await q('INSERT INTO story_views(story_id,viewer_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[id,req.user.id]);res.json({ok:true})});
-app.post('/api/stories/:id/react', auth, async(req,res)=>{try{const id=Number(req.params.id),reaction=String(req.body?.reaction||'❤️').slice(0,16);const ok=await q('SELECT user_id FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!ok.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});const ex=await q('SELECT reaction FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);if(ex.rowCount&&ex.rows[0].reaction===reaction)await q('DELETE FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);else await q('INSERT INTO story_reactions(story_id,user_id,reaction) VALUES($1,$2,$3) ON CONFLICT(story_id,user_id) DO UPDATE SET reaction=EXCLUDED.reaction,created_at=now()',[id,req.user.id,reaction]);const c=await q('SELECT count(*)::int n FROM story_reactions WHERE story_id=$1',[id]);res.json({liked:!!(await q('SELECT 1 FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id])).rowCount,likeCount:Number(c.rows[0].n)});}catch(e){res.status(500).json({error:'ثبت واکنش ناموفق بود'})}});
-app.post('/api/stories/:id/reply', auth, async(req,res)=>{try{const id=Number(req.params.id),text=String(req.body?.text||'').trim().slice(0,500);if(!text)return res.status(400).json({error:'متن پاسخ خالی است'});const ok=await q('SELECT user_id FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!ok.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});const r=await q('INSERT INTO story_replies(story_id,sender_id,text) VALUES($1,$2,$3) RETURNING id,story_id,sender_id,text,created_at',[id,req.user.id,text]); const owner=Number(ok.rows[0].user_id); if(owner!==Number(req.user.id)){ let cr=await q(`SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id AND a.user_id=$1 JOIN conversation_members b ON b.conversation_id=c.id AND b.user_id=$2 WHERE c.type='direct' AND (SELECT count(*) FROM conversation_members z WHERE z.conversation_id=c.id)=2 LIMIT 1`,[req.user.id,owner]); let cid; if(cr.rowCount) cid=Number(cr.rows[0].id); else { const cc=await q(`INSERT INTO conversations(type,name,owner_id) VALUES('direct','', $1) RETURNING id`,[req.user.id]); cid=Number(cc.rows[0].id); await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2),($1,$3) ON CONFLICT DO NOTHING',[cid,req.user.id,owner]); } const msg=await insertMessage({cid,uid:req.user.id,text:'↩ پاسخ به استوری: '+text,kind:'text'}); io.to('conv:'+cid).emit('message',msg); } res.json(r.rows[0]);}catch(e){res.status(500).json({error:'ارسال پاسخ ناموفق بود'})}});
-app.get('/api/stories/:id/stats', auth, async(req,res)=>{try{const id=Number(req.params.id);const st=await q('SELECT user_id FROM stories WHERE id=$1',[id]);if(!st.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});if(Number(st.rows[0].user_id)!==Number(req.user.id))return res.status(403).json({error:'فقط صاحب استوری می‌تواند آمار را ببیند'});const [views,likes]=await Promise.all([q(`SELECT u.id,u.display_name,u.username,u.avatar,sv.viewed_at FROM story_views sv JOIN users u ON u.id=sv.viewer_id WHERE sv.story_id=$1 ORDER BY sv.viewed_at DESC`,[id]),q(`SELECT u.id,u.display_name,u.username,u.avatar,sr.reaction,sr.created_at FROM story_reactions sr JOIN users u ON u.id=sr.user_id WHERE sr.story_id=$1 ORDER BY sr.created_at DESC`,[id])]);res.json({viewCount:views.rowCount,likeCount:likes.rowCount,viewers:views.rows,likers:likes.rows});}catch(e){res.status(500).json({error:'آمار استوری در دسترس نیست'})}});
-
-app.get('/api/calls/history', auth, async(req,res)=>{try{const r=await q(`SELECT ch.*,u.display_name,u.username,u.avatar FROM call_history ch JOIN users u ON u.id=CASE WHEN ch.caller_id=$1 THEN ch.receiver_id ELSE ch.caller_id END WHERE ch.caller_id=$1 OR ch.receiver_id=$1 ORDER BY ch.started_at DESC LIMIT 100`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),caller_id:Number(x.caller_id),receiver_id:Number(x.receiver_id),duration:Number(x.duration||0)})));}catch(e){res.status(500).json({error:'تاریخچه تماس در دسترس نیست'})}});
+app.post('/api/stories/:id/reaction', auth, async(req,res)=>{try{const id=Number(req.params.id), reaction=String(req.body.reaction||'❤️').slice(0,8);const st=await q('SELECT user_id FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!st.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});const ex=await q('SELECT reaction FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);if(ex.rowCount && ex.rows[0].reaction===reaction) await q('DELETE FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);else await q('INSERT INTO story_reactions(story_id,user_id,reaction) VALUES($1,$2,$3) ON CONFLICT(story_id,user_id) DO UPDATE SET reaction=EXCLUDED.reaction,created_at=now()',[id,req.user.id,reaction]);const n=await q('SELECT count(*)::int n FROM story_reactions WHERE story_id=$1',[id]);res.json({ok:true,count:Number(n.rows[0].n),mine:!!ex.rowCount&&ex.rows[0].reaction!==reaction});}catch(e){res.status(500).json({error:'ثبت واکنش ناموفق بود'})}});
+app.get('/api/stories/:id/stats', auth, async(req,res)=>{try{const id=Number(req.params.id);const st=await q('SELECT user_id FROM stories WHERE id=$1',[id]);if(!st.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});if(Number(st.rows[0].user_id)!==Number(req.user.id))return res.status(403).json({error:'فقط صاحب استوری می‌تواند آمار را ببیند'});const v=await q(`SELECT u.id,u.username,u.display_name,u.avatar,sv.viewed_at FROM story_views sv JOIN users u ON u.id=sv.viewer_id WHERE sv.story_id=$1 ORDER BY sv.viewed_at DESC`,[id]);const r=await q(`SELECT u.id,u.username,u.display_name,u.avatar,sr.reaction,sr.created_at FROM story_reactions sr JOIN users u ON u.id=sr.user_id WHERE sr.story_id=$1 ORDER BY sr.created_at DESC`,[id]);res.json({views:v.rows.map(x=>({...x,id:Number(x.id)})),reactions:r.rows.map(x=>({...x,id:Number(x.id)})),viewCount:v.rowCount,reactionCount:r.rowCount});}catch(e){res.status(500).json({error:'دریافت آمار ناموفق بود'})}});
+app.get('/api/conversations/:id/user-settings', auth, async(req,res)=>{const r=await q('SELECT pinned,muted,archived FROM conversation_user_settings WHERE user_id=$1 AND conversation_id=$2',[req.user.id,Number(req.params.id)]);res.json(r.rows[0]||{pinned:false,muted:false,archived:false})});
+app.post('/api/conversations/:id/user-settings', auth, async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const fields=['pinned','muted','archived'].filter(k=>typeof req.body[k]==='boolean');if(!fields.length)return res.status(400).json({error:'گزینه نامعتبر'});const cur=await q('SELECT pinned,muted,archived FROM conversation_user_settings WHERE user_id=$1 AND conversation_id=$2',[req.user.id,cid]);const old=cur.rows[0]||{pinned:false,muted:false,archived:false};const val={...old};fields.forEach(k=>val[k]=req.body[k]);await q(`INSERT INTO conversation_user_settings(user_id,conversation_id,pinned,muted,archived,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(user_id,conversation_id) DO UPDATE SET pinned=$3,muted=$4,archived=$5,updated_at=now()`,[req.user.id,cid,val.pinned,val.muted,val.archived]);res.json(val)});
+app.delete('/api/conversations/:id/self', auth, async(req,res)=>{const cid=Number(req.params.id);const c=await getConversation(cid);if(!c||!await isMember(cid,req.user.id))return res.status(404).json({error:'گفتگو پیدا نشد'});if(c.type==='direct'){await q('DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);}else{await q('DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);}res.json({ok:true})});
 app.delete('/api/stories/:id', auth, async(req,res)=>{await q('DELETE FROM stories WHERE id=$1 AND user_id=$2',[Number(req.params.id),req.user.id]);res.json({ok:true})});
 
 app.post('/api/users/:id/block', auth, async (req, res) => {
@@ -618,10 +610,10 @@ io.on('connection', async socket => {
       const rr=await q('UPDATE messages SET reactions=$1 WHERE id=$2 RETURNING reactions',[JSON.stringify(reactions),mid]); io.to('conv:'+m.conversation_id).emit('reaction',{messageId:mid,reactions:rr.rows[0].reactions});
     }catch(e){console.error('socket react',e)} });
   socket.on('delete_message', async id => { try { const mr=await q('SELECT * FROM messages WHERE id=$1',[Number(id)]); const m=mr.rows[0]; if(!m||Number(m.sender_id)!==uid)return; await q("UPDATE messages SET deleted=true,text='',file_url='' WHERE id=$1",[m.id]); io.to('conv:'+m.conversation_id).emit('message_deleted',Number(m.id)); }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', async d => { try { const r=await q(`INSERT INTO call_history(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(r.rows[0].id); socket.emit('call:created',{callId}); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); } catch(e){ console.error('call offer log',e.message); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}); }});
-  socket.on('call:answer', async d => { try { if(d.callId) await q(`UPDATE call_history SET status='completed',connected_at=now() WHERE id=$1 AND receiver_id=$2`,[Number(d.callId),uid]); } catch(e){} io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer,callId:d.callId}); });
-  socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate,callId:d.callId}));
-  socket.on('call:end', async d => { try { if(d.callId) await q(`UPDATE call_history SET status=CASE WHEN connected_at IS NULL THEN 'missed' ELSE 'completed' END,ended_at=now(),duration=CASE WHEN connected_at IS NULL THEN 0 ELSE GREATEST(0,EXTRACT(EPOCH FROM (now()-connected_at))::int) END WHERE id=$1`,[Number(d.callId)]); } catch(e){} io.to('user:'+Number(d.to)).emit('call:end',{from:uid,callId:d.callId}); });
+  socket.on('call:offer', d => io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}));
+  socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
+  socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
+  socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
@@ -878,11 +870,9 @@ async function ensureStage5Schema(){
   )`);
   await q(`CREATE INDEX IF NOT EXISTS stories_user_exp_idx ON stories(user_id,expires_at)`);
   await q(`CREATE TABLE IF NOT EXISTS story_reactions (story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, reaction TEXT NOT NULL DEFAULT '❤️', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(story_id,user_id))`);
-  await q(`CREATE TABLE IF NOT EXISTS story_replies (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE, sender_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   await q(`CREATE INDEX IF NOT EXISTS story_reactions_story_idx ON story_reactions(story_id)`);
-  await q(`CREATE INDEX IF NOT EXISTS story_replies_story_idx ON story_replies(story_id,created_at)`);
-  await q(`CREATE TABLE IF NOT EXISTS call_history (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, caller_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, receiver_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, type TEXT NOT NULL CHECK(type IN ('audio','video')), status TEXT NOT NULL DEFAULT 'ringing', started_at TIMESTAMPTZ NOT NULL DEFAULT now(), connected_at TIMESTAMPTZ, ended_at TIMESTAMPTZ, duration INTEGER NOT NULL DEFAULT 0)`);
-  await q(`CREATE INDEX IF NOT EXISTS call_history_users_idx ON call_history(caller_id,receiver_id,started_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_user_settings (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, pinned BOOLEAN NOT NULL DEFAULT false, muted BOOLEAN NOT NULL DEFAULT false, archived BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,conversation_id))`);
+
 }
 
 async function ensureStorageBucket(){
