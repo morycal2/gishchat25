@@ -241,19 +241,28 @@ app.post('/api/conversations/channel', auth, async (req, res) => {
 app.get('/api/public/conversations/:username', async (req, res) => {
   try {
     const username = String(req.params.username || '').trim().toLowerCase();
-    const r = await q(`SELECT id,name,type,description,username,photo FROM conversations WHERE username=$1 AND type IN ('group','channel') LIMIT 1`, [username]);
+    const r = await q(`SELECT id,name,type,description,username,photo,settings FROM conversations WHERE lower(username)=lower($1) AND type IN ('group','channel') LIMIT 1`, [username]);
     if (!r.rowCount) return res.status(404).json({ error: 'گروه یا کانال پیدا نشد' });
     const c = r.rows[0];
-    res.json({ id: Number(c.id), name: c.name, type: c.type, description: c.description || '', username: c.username || '', photo: c.photo || '' });
+    res.json({ id: Number(c.id), name: c.name, type: c.type, description: c.description || '', username: c.username || '', photo: c.photo || '', private: !!(c.settings?.joinApproval) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'لینک گفتگو در دسترس نیست' }); }
 });
 
 app.post('/api/conversations/:id/join', auth, async (req, res) => {
   const c = await getConversation(req.params.id);
   if (!c || !['channel','group'].includes(c.type)) return res.status(404).json({ error: 'گفتگو پیدا نشد' });
+  const settings=c.settings||{};
+  if(settings.joinApproval && Number(c.owner_id)!==Number(req.user.id) && !await isMember(c.id,req.user.id)){
+    await q(`CREATE TABLE IF NOT EXISTS conversation_join_requests (conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(conversation_id,user_id))`);
+    await q(`INSERT INTO conversation_join_requests(conversation_id,user_id) VALUES($1,$2) ON CONFLICT(conversation_id,user_id) DO UPDATE SET status='pending',created_at=now()`,[c.id,req.user.id]);
+    return res.status(202).json({pending:true,conversation:{id:Number(c.id),name:c.name,type:c.type,username:c.username||'',description:c.description||''}});
+  }
   await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [c.id, req.user.id]);
   res.json(await conversationView(c, req.user.id));
 });
+app.post('/api/conversations/:id/join-request', auth, async(req,res)=>{const c=await getConversation(req.params.id);if(!c||!['group','channel'].includes(c.type))return res.status(404).json({error:'گفتگو پیدا نشد'});if(await isMember(c.id,req.user.id))return res.json({joined:true});await q(`CREATE TABLE IF NOT EXISTS conversation_join_requests (conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(conversation_id,user_id))`);await q(`INSERT INTO conversation_join_requests(conversation_id,user_id) VALUES($1,$2) ON CONFLICT(conversation_id,user_id) DO UPDATE SET status='pending',created_at=now()`,[c.id,req.user.id]);res.json({pending:true});});
+app.get('/api/conversations/:id/join-requests',auth,async(req,res)=>{const c=await getConversation(req.params.id);if(!c||Number(c.owner_id)!==Number(req.user.id))return res.status(403).json({error:'دسترسی ندارید'});await q(`CREATE TABLE IF NOT EXISTS conversation_join_requests (conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(conversation_id,user_id))`);const r=await q(`SELECT jr.user_id,u.username,u.display_name,u.avatar,jr.created_at FROM conversation_join_requests jr JOIN users u ON u.id=jr.user_id WHERE jr.conversation_id=$1 AND jr.status='pending' ORDER BY jr.created_at DESC`,[c.id]);res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id)})));});
+app.post('/api/conversations/:id/join-requests/:userId',auth,async(req,res)=>{const c=await getConversation(req.params.id);if(!c||Number(c.owner_id)!==Number(req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const uid=Number(req.params.userId),action=req.body.action==='reject'?'reject':'approve';await q(`CREATE TABLE IF NOT EXISTS conversation_join_requests (conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(conversation_id,user_id))`);if(action==='approve'){await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[c.id,uid]);await q(`UPDATE conversation_join_requests SET status='approved' WHERE conversation_id=$1 AND user_id=$2`,[c.id,uid])}else await q(`UPDATE conversation_join_requests SET status='rejected' WHERE conversation_id=$1 AND user_id=$2`,[c.id,uid]);res.json({ok:true,action});});
 
 app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   const cid = Number(req.params.id);
@@ -308,6 +317,20 @@ app.post('/api/messages', auth, async (req, res) => {
     if (!text && !fileUrl) return res.status(400).json({ error: 'پیام خالی است' });
     const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
     io.to('conv:' + cid).emit('message', out);
+    // Zento BotFather-compatible command helper. It is intentionally a native Zento bot, not Telegram's service.
+    const cf=await getConversation(cid);
+    if(cf?.type==='direct' && text && /^\//.test(text)){
+      const bm=await q(`SELECT u.id,b.id bot_id FROM users u LEFT JOIN bots b ON b.username='BotFather' WHERE u.username='BotFather' LIMIT 1`);
+      const other=cf.members?.find?.(x=>Number(x.id)!==Number(req.user.id));
+      if(bm.rowCount && other && Number(other.user_id)===Number(bm.rows[0].id)){
+        const cmd=text.trim().split(/\s+/)[0].toLowerCase(); let reply='';
+        if(cmd==='/start'||cmd==='/help') reply='🤖 BotFather زنتو\n\n/newbot — ساخت ربات جدید\n/mybots — فهرست ربات‌ها\n/setdescription — توضیحات ربات\n/setusername — تغییر شناسه\n/deletebot — حذف ربات\n\nبرای ساخت ربات از /newbot استفاده کن.';
+        else if(cmd==='/mybots'){const bs=await q("SELECT username,name FROM bots WHERE owner_id=$1 AND username<>'BotFather' ORDER BY id DESC",[req.user.id]);reply=bs.rows.length?'🤖 ربات‌های شما:\n'+bs.rows.map(x=>`• @${x.username} — ${x.name}`).join('\n'):'هنوز رباتی نداری. /newbot';}
+        else if(cmd==='/newbot'){const parts=text.trim().split(/\s+/);const name=parts.slice(1,-1).join(' ')||'ربات جدید';let username=(parts.at(-1)||'').replace(/^@/,'');if(!username||username.toLowerCase()==='botfather')reply='فرمت: /newbot نام ربات username';else {if(!/^[A-Za-z][A-Za-z0-9_]{2,31}$/.test(username))reply='شناسه باید انگلیسی و ۳ تا ۳۲ کاراکتر باشد.';else {const exists=await q('SELECT 1 FROM bots WHERE lower(username)=lower($1)',[username]);if(exists.rowCount)reply='این شناسه قبلاً استفاده شده است.';else {const b=await q(`INSERT INTO bots(owner_id,username,name,description,webhook_url,token) VALUES($1,$2,$3,'','',$4) RETURNING token,username,name`,[req.user.id,username,name,makeBotToken()]);reply=`ربات ساخته شد ✓\n@${b.rows[0].username}\nتوکن: ${b.rows[0].token}\n\nتوکن را مثل رمز عبور محرمانه نگه دار.`;}}}}
+        else reply='دستور ناشناخته است. /help';
+        const botOut=await insertMessage({cid,uid:Number(bm.rows[0].id),text:reply,kind:'bot',botId:Number(bm.rows[0].bot_id)});io.to('conv:'+cid).emit('message',botOut);
+      }
+    }
     res.json(out);
   } catch (e) { console.error(e); res.status(500).json({ error: 'ارسال پیام ناموفق بود' }); }
 });
@@ -493,21 +516,30 @@ app.get('/api/public/users/:username/profile', auth, async (req,res)=>{
   if(!ur.rowCount)return res.status(404).json({error:'کاربر پیدا نشد'});
   const id=Number(ur.rows[0].id);
   const media=await q('SELECT id,kind,url,name,mime,position FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[id]);
-  const stories=await q(`SELECT s.id,s.kind,s.url,s.text,s.created_at,s.expires_at
-    FROM stories s WHERE s.user_id=$1 AND s.expires_at>now() ORDER BY s.created_at DESC`,[id]);
+  const stories=await q(`SELECT s.id,s.kind,s.url,s.text,s.created_at,s.expires_at,s.tags,s.editor,s.duration_ms
+    FROM stories s WHERE s.user_id=$1 AND s.expires_at>now() AND ($2=$1 OR (
+      (COALESCE(s.visibility->>'mode','all')='all') OR
+      (COALESCE(s.visibility->>'mode','all')='all_except' AND NOT (s.visibility->'ids') ? $2::text) OR
+      (COALESCE(s.visibility->>'mode','all')='only' AND (s.visibility->'ids') ? $2::text)
+    ) AND EXISTS(SELECT 1 FROM conversation_members cm1 JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id WHERE cm1.user_id=$2 AND cm2.user_id=s.user_id)) ORDER BY s.created_at DESC`,[id,req.user.id]);
   res.json({...safeUser(ur.rows[0]),photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),stories:stories.rows.map(x=>({...x,id:Number(x.id)}))});
 });
 app.get('/api/stories/feed', auth, async (req,res)=>{
-  const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,
+  const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,s.visibility,s.tags,s.editor,s.duration_ms,
       u.username,u.display_name,u.avatar,
-      EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed, (SELECT count(*) FROM story_views vx WHERE vx.story_id=s.id) AS view_count, (SELECT count(*) FROM story_reactions rx WHERE rx.story_id=s.id) AS reaction_count, EXISTS(SELECT 1 FROM story_reactions rm WHERE rm.story_id=s.id AND rm.user_id=$1) AS reacted
+      EXISTS(SELECT 1 FROM story_views sv WHERE sv.story_id=s.id AND sv.viewer_id=$1) AS viewed,
+      (SELECT count(*) FROM story_views vx WHERE vx.story_id=s.id) AS view_count,
+      (SELECT count(*) FROM story_reactions rx WHERE rx.story_id=s.id) AS reaction_count,
+      EXISTS(SELECT 1 FROM story_reactions rm WHERE rm.story_id=s.id AND rm.user_id=$1) AS reacted
     FROM stories s JOIN users u ON u.id=s.user_id
-    WHERE s.expires_at>now() AND (s.user_id=$1 OR EXISTS(
-      SELECT 1 FROM conversation_members cm1 JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id
-      WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id))
+    WHERE s.expires_at>now() AND (s.user_id=$1 OR (
+      (COALESCE(s.visibility->>'mode','all')='all') OR
+      (COALESCE(s.visibility->>'mode','all')='all_except' AND NOT (s.visibility->'ids') ? $1::text) OR
+      (COALESCE(s.visibility->>'mode','all')='only' AND (s.visibility->'ids') ? $1::text)
+    ) AND EXISTS(SELECT 1 FROM conversation_members cm1 JOIN conversation_members cm2 ON cm2.conversation_id=cm1.conversation_id WHERE cm1.user_id=$1 AND cm2.user_id=s.user_id))
     ORDER BY s.created_at ASC`,[req.user.id]);
   const grouped=new Map();
-  for(const x of r.rows){if(!grouped.has(x.user_id))grouped.set(x.user_id,{user_id:Number(x.user_id),username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(x.user_id);g.stories.push({...x,id:Number(x.id),user_id:Number(x.user_id)});if(!x.viewed)g.has_unseen=true}
+  for(const x of r.rows){if(!grouped.has(x.user_id))grouped.set(x.user_id,{user_id:Number(x.user_id),username:x.username,display_name:x.display_name,avatar:x.avatar||'',has_unseen:false,stories:[]});const g=grouped.get(x.user_id);g.stories.push({...x,id:Number(x.id),user_id:Number(x.user_id),view_count:Number(x.view_count),reaction_count:Number(x.reaction_count),duration_ms:Number(x.duration_ms||10000)});if(!x.viewed)g.has_unseen=true}
   res.json([...grouped.values()]);
 });
 app.post('/api/stories', auth, (req,res)=>{
@@ -517,8 +549,15 @@ app.post('/api/stories', auth, (req,res)=>{
     const active=await q("SELECT count(*)::int AS n FROM stories WHERE user_id=$1 AND expires_at>now()",[req.user.id]);
     if(Number(active.rows[0].n)>=20)return res.status(400).json({error:'حداکثر ۲۰ استوری فعال مجاز است'});
     const stored=await uploadToStorage(req.file,'stories',req.user.id);
-    const text=String(req.body.text||'').trim().slice(0,500);
-    const r=await q(`INSERT INTO stories(user_id,kind,url,text,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours') RETURNING *`,[req.user.id,req.file.mimetype.startsWith('video/')?'video':'photo',stored.url,text]);
+    const text=String(req.body.text||'').trim().slice(0,1000);
+    let visibility={mode:'all',ids:[]},tags=[],editor={},durationMs=req.file.mimetype.startsWith('video/')?Math.min(45000,Math.max(1000,Number(req.body.durationMs||45000))):10000;
+    try{visibility=JSON.parse(req.body.visibility||'{"mode":"all","ids":[]}')}catch{}
+    try{tags=JSON.parse(req.body.tags||'[]')}catch{}
+    try{editor=JSON.parse(req.body.editor||'{}')}catch{}
+    if(!['all','all_except','only','none'].includes(visibility.mode))visibility={mode:'all',ids:[]};
+    visibility.ids=Array.isArray(visibility.ids)?visibility.ids.map(Number).filter(Boolean).slice(0,500):[];
+    if(visibility.mode==='none')visibility.ids=[];
+    const r=await q(`INSERT INTO stories(user_id,kind,url,text,visibility,tags,editor,duration_ms,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,now()+interval '24 hours') RETURNING *`,[req.user.id,req.file.mimetype.startsWith('video/')?'video':'photo',stored.url,text,JSON.stringify(visibility),JSON.stringify(tags),JSON.stringify(editor),durationMs]);
     res.json({...r.rows[0],id:Number(r.rows[0].id),user_id:Number(r.rows[0].user_id)});
   }catch(e){console.error(e);res.status(500).json({error:'ساخت استوری ناموفق بود'})}})
 });
@@ -620,22 +659,7 @@ io.on('connection', async socket => {
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
-      const reactions=m.reactions||{};
-      // A user may have only one reaction on each message. Selecting another emoji
-      // removes the previous one; selecting the same emoji again toggles it off.
-      let hadSame=false;
-      for(const key of Object.keys(reactions)){
-        const arr=Array.isArray(reactions[key])?reactions[key]:[];
-        if(arr.includes(uid)){
-          if(key===emoji) hadSame=true;
-          reactions[key]=arr.filter(id=>Number(id)!==Number(uid));
-          if(!reactions[key].length) delete reactions[key];
-        }
-      }
-      if(!hadSame){
-        if(!Array.isArray(reactions[emoji])) reactions[emoji]=[];
-        reactions[emoji].push(uid);
-      }
+      const reactions=m.reactions||{}; const arr=Array.isArray(reactions[emoji])?reactions[emoji]:[]; const i=arr.indexOf(uid); if(i>=0)arr.splice(i,1);else arr.push(uid); if(arr.length)reactions[emoji]=arr;else delete reactions[emoji];
       const rr=await q('UPDATE messages SET reactions=$1 WHERE id=$2 RETURNING reactions',[JSON.stringify(reactions),mid]); io.to('conv:'+m.conversation_id).emit('reaction',{messageId:mid,reactions:rr.rows[0].reactions});
     }catch(e){console.error('socket react',e)} });
   socket.on('delete_message', async d => { try {
@@ -657,12 +681,6 @@ io.on('connection', async socket => {
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
-  // Lightweight mesh conference signaling for small groups/channels. Media stays peer-to-peer; server only relays SDP/ICE.
-  socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
-  socket.on('conference:offer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
-  socket.on('conference:answer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:answer',{room,from:uid,answer:d.answer}); });
-  socket.on('conference:ice', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:ice',{room,from:uid,candidate:d.candidate}); });
-  socket.on('conference:leave', d => { const room=String(d.room||''); socket.leave(room); socket.to(room).emit('conference:peer-left',{room,userId:uid}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
@@ -901,6 +919,10 @@ async function ensureStage4Schema(){
     UNIQUE(bot_id,command)
   )`);
   await q(`CREATE INDEX IF NOT EXISTS bots_owner_idx ON bots(owner_id)`);
+  const bh=await bcrypt.hash(crypto.randomBytes(24).toString('hex'),12);
+  await q(`INSERT INTO users(username,email,password_hash,display_name,bio) VALUES('BotFather','botfather@zento.local',$1,'BotFather','مدیر ساخت و مدیریت ربات‌های زنتو') ON CONFLICT(username) DO NOTHING`,[bh]);
+  const bu=await q(`SELECT id FROM users WHERE username='BotFather' LIMIT 1`);
+  if(bu.rowCount) await q(`INSERT INTO bots(owner_id,username,name,description,webhook_url,token) VALUES($1,'BotFather','BotFather','مدیریت ربات‌ها به سبک BotFather زنتو','',$2) ON CONFLICT(username) DO NOTHING`,[Number(bu.rows[0].id),'zento_botfather_system']);
 }
 
 async function ensureStage5Schema(){
@@ -920,6 +942,10 @@ async function ensureStage5Schema(){
     PRIMARY KEY(story_id,viewer_id)
   )`);
   await q(`CREATE INDEX IF NOT EXISTS stories_user_exp_idx ON stories(user_id,expires_at)`);
+  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS visibility JSONB NOT NULL DEFAULT '{"mode":"all","ids":[]}'::jsonb`);
+  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS editor JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await q(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS duration_ms INTEGER NOT NULL DEFAULT 10000`);
   await q(`CREATE TABLE IF NOT EXISTS story_reactions (story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, reaction TEXT NOT NULL DEFAULT '❤️', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(story_id,user_id))`);
   await q(`CREATE INDEX IF NOT EXISTS story_reactions_story_idx ON story_reactions(story_id)`);
   await q(`CREATE TABLE IF NOT EXISTS conversation_user_settings (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, pinned BOOLEAN NOT NULL DEFAULT false, muted BOOLEAN NOT NULL DEFAULT false, archived BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,conversation_id))`);
