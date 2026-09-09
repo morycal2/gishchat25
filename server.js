@@ -114,11 +114,11 @@ async function conversationView(c, viewerId=currentViewUserId) {
   const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio
     FROM conversation_members cm JOIN users u ON u.id=cm.user_id
     WHERE cm.conversation_id=$1 ORDER BY cm.user_id`, [c.id]);
-  const last = await q(`SELECT id,text,kind,created_at FROM messages WHERE conversation_id=$1 AND deleted=false ORDER BY id DESC LIMIT 1`, [c.id]);
+  const last = await q(`SELECT id,text,kind,created_at FROM messages WHERE conversation_id=$1 AND deleted=false AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2) ORDER BY id DESC LIMIT 1`, [c.id, viewerId]);
   const m = last.rows[0];
   let lastText = '';
   if (m) lastText = m.kind === 'voice' ? '🎙️ پیام صوتی' : m.kind === 'image' ? '🖼️ تصویر' : m.kind === 'video' ? '🎬 ویدیو' : m.kind === 'audio' ? '🎵 آهنگ' : (m.text || '📎 فایل');
-  const unread = await q(`SELECT count(*)::int AS n FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 WHERE m.conversation_id=$1 AND m.sender_id<>$2 AND m.deleted=false AND m.created_at>cm.last_read_at`, [c.id, viewerId]);
+  const unread = await q(`SELECT count(*)::int AS n FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 WHERE m.conversation_id=$1 AND m.sender_id<>$2 AND m.deleted=false AND m.created_at>cm.last_read_at AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2)`, [c.id, viewerId]);
   return {
     id: Number(c.id), name: c.name, type: c.type || 'group', created_at: c.created_at,
     last_text: lastText, last_time: m ? m.created_at : c.created_at,
@@ -321,7 +321,7 @@ app.get('/api/conversations/:id/search', auth, async (req,res)=>{
     const params=[cid,text,sender,from,to];
     let where=`conversation_id=$1 AND deleted=false AND ($2='' OR text ILIKE '%'||$2||'%') AND ($3::bigint IS NULL OR sender_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4) AND ($5::timestamptz IS NULL OR created_at < $5)`;
     if(type==='image') where += ` AND file_type LIKE 'image/%'`; else if(type==='video') where += ` AND file_type LIKE 'video/%'`; else if(type==='audio') where += ` AND (file_type LIKE 'audio/%' OR kind='voice')`; else if(type==='file') where += ` AND file_url<>'' AND file_type NOT LIKE 'image/%' AND file_type NOT LIKE 'video/%' AND file_type NOT LIKE 'audio/%'`; else if(type==='link') where += ` AND text ~* 'https?://[^[:space:]]+'`;
-    const r=await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids FROM messages WHERE ${where} ORDER BY id DESC LIMIT 100`,params);
+    const r=await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids FROM messages WHERE ${where} AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$6) ORDER BY id DESC LIMIT 100`,[...params, req.user.id]);
     const out=[]; for(const m of r.rows) out.push(await messageView(m)); res.json(out);
   }catch(e){console.error(e);res.status(500).json({error:'جستجو ناموفق بود'})}
 });
@@ -338,6 +338,18 @@ async function uploadToStorage(file, folder, userId) {
   if (error) throw error;
   const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(objectPath);
   return { url: data.publicUrl, path: objectPath };
+}
+
+async function removeStoredMessageFile(fileUrl) {
+  if (!fileUrl) return;
+  try {
+    const raw = String(fileUrl);
+    const marker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+    const i = raw.indexOf(marker);
+    if (i < 0) return;
+    const objectPath = decodeURIComponent(raw.slice(i + marker.length).split('?')[0]);
+    if (objectPath) await supabase.storage.from(STORAGE_BUCKET).remove([objectPath]);
+  } catch (e) { console.warn('message storage cleanup', e.message); }
 }
 
 app.post('/api/upload', auth, (req, res) => {
@@ -573,6 +585,8 @@ app.post('/api/saved/chat/messages', auth, async (req,res)=>{
   }catch(e){console.error('saved chat post',e);res.status(500).json({error:'ذخیره پیام ناموفق بود'})}
 });
 
+app.post('/api/support', auth, async (req,res)=>{try{const subject=String(req.body.subject||'').trim().slice(0,100),message=String(req.body.message||'').trim().slice(0,2000);if(!message)return res.status(400).json({error:'پیام پشتیبانی الزامی است'});const r=await q('INSERT INTO support_requests(user_id,subject,message) VALUES($1,$2,$3) RETURNING id,created_at',[req.user.id,subject,message]);res.json({ok:true,id:Number(r.rows[0].id),created_at:r.rows[0].created_at});}catch(e){console.error('support',e);res.status(500).json({error:'ارسال درخواست پشتیبانی ناموفق بود'})}});
+
 app.get('/api/saved', auth, async (req, res) => {
   const r = await q(`SELECT s.id AS saved_id,s.created_at AS saved_at,m.* FROM saved_messages s
     JOIN messages m ON m.id=s.message_id WHERE s.user_id=$1 ORDER BY s.id DESC LIMIT 500`, [req.user.id]);
@@ -609,7 +623,21 @@ io.on('connection', async socket => {
       const reactions=m.reactions||{}; const arr=Array.isArray(reactions[emoji])?reactions[emoji]:[]; const i=arr.indexOf(uid); if(i>=0)arr.splice(i,1);else arr.push(uid); if(arr.length)reactions[emoji]=arr;else delete reactions[emoji];
       const rr=await q('UPDATE messages SET reactions=$1 WHERE id=$2 RETURNING reactions',[JSON.stringify(reactions),mid]); io.to('conv:'+m.conversation_id).emit('reaction',{messageId:mid,reactions:rr.rows[0].reactions});
     }catch(e){console.error('socket react',e)} });
-  socket.on('delete_message', async id => { try { const mr=await q('SELECT * FROM messages WHERE id=$1',[Number(id)]); const m=mr.rows[0]; if(!m||Number(m.sender_id)!==uid)return; await q("UPDATE messages SET deleted=true,text='',file_url='' WHERE id=$1",[m.id]); io.to('conv:'+m.conversation_id).emit('message_deleted',Number(m.id)); }catch(e){console.error('socket delete',e)} });
+  socket.on('delete_message', async d => { try {
+    const id=Number(typeof d==='object'?d.id:d), mode=typeof d==='object'?(d.mode||'for_me'):'for_everyone';
+    const mr=await q('SELECT * FROM messages WHERE id=$1',[id]); const m=mr.rows[0];
+    if(!m || m.deleted || !await isMember(m.conversation_id,uid)) return;
+    if(mode==='for_everyone'){
+      if(Number(m.sender_id)!==uid) return;
+      await q('DELETE FROM saved_messages WHERE message_id=$1',[m.id]);
+      await q('DELETE FROM messages WHERE id=$1',[m.id]);
+      await removeStoredMessageFile(m.file_url);
+      io.to('conv:'+m.conversation_id).emit('message_deleted',Number(m.id));
+    } else {
+      await q('INSERT INTO message_hidden(message_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[m.id,uid]);
+      socket.emit('message_hidden',Number(m.id));
+    }
+  }catch(e){console.error('socket delete',e)} });
   socket.on('call:offer', d => io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}));
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
@@ -816,6 +844,8 @@ async function ensureStage1Schema(){
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quote_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await q(`ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
   await q(`CREATE TABLE IF NOT EXISTS message_receipts (message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, delivered_at TIMESTAMPTZ, read_at TIMESTAMPTZ, PRIMARY KEY(message_id,user_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS message_hidden (message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, hidden_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(message_id,user_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS support_requests (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject TEXT NOT NULL DEFAULT '', message TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
 }
 
 

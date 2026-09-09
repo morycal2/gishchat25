@@ -228,3 +228,12 @@ body.dark .mobile-home-nav button span{background:rgba(255,255,255,.06);box-shad
 .message-context-menu button:first-letter{font-size:16px}
 .message-context-menu .quick-reactions button{min-height:34px!important;border-radius:50%!important;background:rgba(34,158,217,.06)!important}
 .message-context-menu .quick-reactions button:hover{transform:translateY(-2px) scale(1.06);background:rgba(34,158,217,.13)!important}
+
+/* ===== Zento UI Polish v4.11 ===== */
+.zento-icon{width:19px;height:19px;display:block;flex:0 0 19px}.zento-icon-wrap{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;color:currentColor;flex:0 0 30px}.round-btn .zento-icon,.head-btn .zento-icon,.tool .zento-icon{width:19px;height:19px}.drawer-list button{display:flex;align-items:center;gap:10px}.drawer-list button .zento-icon-wrap{background:rgba(51,144,236,.08);color:var(--accent)}.mobile-home-nav button .zento-icon-wrap{width:30px;height:28px;background:transparent}.mobile-home-nav button.active .zento-icon-wrap{background:rgba(51,144,236,.12)}
+.modal-head{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:4;background:inherit}.modal-head h3{flex:1}.modal-back{order:-1;width:40px;height:40px;border-radius:12px;background:var(--panel2);color:var(--text);font-size:28px;line-height:1;display:grid;place-items:center}.modal-back:hover{background:#e6f3fb;color:var(--accent);transform:translateX(-2px)}
+.support-panel{padding:18px}.support-hero{display:grid;justify-items:center;gap:5px;padding:8px 0 18px;text-align:center}.support-icon{width:58px;height:58px;border-radius:19px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),#7658f5);color:#fff;font-size:26px;font-weight:900;box-shadow:0 14px 35px rgba(51,144,236,.22)}.support-panel textarea{min-height:140px;resize:vertical}
+.message-context-menu .danger{color:var(--danger)!important}.message-context-menu button[data-act="deleteAll"]{background:rgba(233,91,100,.07)}
+@media(max-width:850px){.mobile-home-nav{grid-template-columns:repeat(6,1fr)!important}.mobile-home-nav button small{font-size:8px}.mobile-home-nav button{font-size:18px}.modal-back{width:38px;height:38px}}
+
+.custom-media-close.modal-back,.story-close.modal-back{background:rgba(255,255,255,.14);color:inherit;font-size:28px}.custom-media-top .modal-back{order:0}.story-close.modal-back{position:absolute;left:14px;top:14px;z-index:8}
