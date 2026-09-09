@@ -339,7 +339,17 @@ function stage1Style(){if(document.getElementById('stage1-style'))return;const s
 `;document.head.appendChild(st)}
 async function stage1Load(){try{const p=await api('/api/preferences');stage1ApplyTheme(p.theme)}catch{}try{stage1Folders=await api('/api/folders')}catch{stage1Folders=[]}try{stage1Profiles=await api('/api/profiles')}catch{stage1Profiles=[]}if(stage1Profiles.length)stage1Profiles.forEach(p=>{if(p.is_default)stage1ProfileByConv._default=p.id});stage1RenderFolders()}
 function ensureStoryBar(){return $('storyTopBar')}
-async function renderStoryTopBar(){const b=ensureStoryBar();if(!b)return;const groups=await loadStories();const cards=groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}">${storyRing(g,'story-top-ring')}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');b.innerHTML=`<button class="story-top-card mine" id="storyTopAdd">＋<span>استوری من</span></button>${cards||''}`;b.querySelector('#storyTopAdd')?.addEventListener('click',openStoryComposer);b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>openStories(Number(x.dataset.storyUser)))}
+async function renderStoryTopBar(){
+  const groups=await loadStories();
+  const html=`<button class="story-top-card mine" id="storyTopAdd" type="button"><span class="story-top-add-ring">＋</span><span>استوری من</span></button>`+
+    groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${storyRing(g,'story-top-ring')}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');
+  [$('storyTopBar'),$('chatStoryTopBar')].filter(Boolean).forEach(b=>{
+    b.innerHTML=html;
+    b.classList.add('story-bar-ready');
+    b.querySelector('#storyTopAdd')?.addEventListener('click',openStoryComposer);
+    b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>openStories(Number(x.dataset.storyUser)));
+  });
+}
 function stage1EnsureFolderBar(){let b=$('stage1Folders');if(!b&&$('chats')){ $('chats').insertAdjacentHTML('beforebegin','<div id="stage1Folders" class="stage1-folders"></div>');b=$('stage1Folders')}return b}
 function stage1RenderFolders(){const b=stage1EnsureFolderBar();if(!b)return;const active=stage1Folder!=='all'&&stage1Folder!=='__add';const folder=stage1Folders.find(x=>String(x.id)===String(stage1Folder));const chips=[{id:'all',name:'همه',icon:'💬'},...stage1Folders.map(f=>({id:String(f.id),name:f.name,icon:f.icon}))];b.innerHTML=chips.map(f=>`<button class="stage1-folder ${String(stage1Folder)===String(f.id)?'active':''}" data-folder="${esc(f.id)}">${f.icon} ${esc(f.name)}</button>`).join('')+`<button class="stage1-folder folder-new" data-folder="__add">＋ پوشه</button>`+(active?`<button class="stage1-folder folder-add-chat" data-folder-action="add-chat">➕ افزودن گفتگو</button>`:'');b.querySelectorAll('[data-folder]').forEach(x=>x.onclick=async()=>{if(x.dataset.folder==='__add'){const name=window.zentoDialog?await window.zentoDialog.prompt('نام پوشه','یک نام برای پوشه وارد کنید'):prompt('نام پوشه:');if(!name?.trim())return;try{const f=await api('/api/folders',{method:'POST',body:JSON.stringify({name:name.trim(),icon:'📁'})});stage1Folders.push(f);stage1Folder=String(f.id);stage1RenderFolders();stage1RenderConvs()}catch(e){showToast(e.message,true)}}else{stage1Folder=x.dataset.folder;stage1RenderFolders();stage1RenderConvs()}});b.querySelector('[data-folder-action="add-chat"]')?.addEventListener('click',()=>stage1AddConversationsToFolder(folder));}
 async function stage1AddConversationsToFolder(folder){if(!folder)return;const available=convs.filter(c=>!(folder.conversations||[]).map(Number).includes(Number(c.id)));if(!available.length)return showToast('همه گفتگوها داخل این پوشه هستند');openModal('➕ افزودن گفتگو به پوشه',`<div class="folder-add-head"><b>${esc(folder.icon||'📁')} ${esc(folder.name)}</b><small>گفتگوهایی را که می‌خواهی به این پوشه اضافه شوند انتخاب کن.</small></div><div class="folder-conversation-picks">${available.map(c=>{const other=c.type==='direct'?c.members.find(x=>Number(x.id)!==Number(me.id)):null;const title=c.type==='direct'?(other?.display_name||'گفتگو'):c.name;return `<label class="folder-conversation-item"><input type="checkbox" value="${c.id}"><span>${c.type==='direct'?avatar(other,'avatar tiny-avatar'):`<span class="avatar tiny-avatar">${c.type==='channel'?'📢':'👥'}</span>`}</span><span><b>${esc(title)}</b><small>${c.type==='direct'?'@'+esc(other?.username||''):c.type==='group'?'گروه':'کانال'}</small></span></label>`}).join('')}</div>`,async()=>{const ids=[...document.querySelectorAll('.folder-conversation-picks input:checked')].map(x=>Number(x.value));if(!ids.length)return showToast('حداقل یک گفتگو انتخاب کن');for(const cid of ids)await api(`/api/folders/${folder.id}/conversations/${cid}`,{method:'POST'});stage1Folders=await api('/api/folders');stage1RenderFolders();stage1RenderConvs();closeModal();showToast(`${ids.length} گفتگو به پوشه اضافه شد ✓`)});$('modalOk').textContent='افزودن';}
@@ -539,11 +549,7 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
     const refresh=type=>{const sel=$('supportTopic');if(!sel)return;sel.innerHTML=topics[type].map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');$('supportPhoneWrap').classList.toggle('hidden',type!=='contact');$('supportHint').textContent=type==='contact'?'شماره تماس را وارد کن تا امکان هماهنگی وجود داشته باشد.':type==='feedback'?'ایده و انتقادت مستقیماً برای تیم زنتو ثبت می‌شود.':'درخواست گفتگوی خود را با جزئیات بنویس.'};
     document.querySelectorAll('[data-support-type]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-support-type]').forEach(x=>x.classList.toggle('active',x===b));refresh(b.dataset.supportType)});refresh('chat');
   }
-  function patchChatStoryBar(){
-    const old=renderStoryTopBar;
-    renderStoryTopBar=async function(){await old();const src=$('storyTopBar'),dst=$('chatStoryTopBar');if(!src||!dst)return;dst.innerHTML=src.innerHTML;dst.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>openStories(Number(x.dataset.storyUser)));dst.querySelector('#storyTopAdd')?.addEventListener('click',openStoryComposer);};
-    renderStoryTopBar().catch(()=>{});
-  }
+  function patchChatStoryBar(){renderStoryTopBar().catch(()=>{});}
   function setupDrawerBack(){
     $('drawerBack')?.addEventListener('click',closeDrawer);
     $('drawerShade')?.addEventListener('click',closeDrawer);
@@ -561,9 +567,29 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
     document.querySelectorAll('[data-switch-account]').forEach(b=>b.onclick=async()=>{const x=a[Number(b.dataset.switchAccount)];if(!x?.token)return;try{token=x.token;localStorage.setItem('zento_token',token);closeModal();await boot();showToast(`حساب ${x.display_name||x.username} فعال شد ✓`)}catch(e){showToast(e.message,true)}});
   }
   function openAddAccount(){
-    const a=getAccounts();if(a.length>=3)return showToast('حداکثر ۳ حساب مجاز است',true);
-    openModal('＋ افزودن حساب',`<div class="account-login-panel"><div class="support-hero"><div class="support-icon">＋</div><b>ورود به حساب دیگر</b><small>حساب فعلی دست‌نخورده می‌ماند و بعداً می‌توانی بین حساب‌ها جابه‌جا شوی.</small></div><label>ایمیل<input id="accountEmail" type="email" autocomplete="email" placeholder="ایمیل حساب"></label><label>رمز عبور<input id="accountPass" type="password" autocomplete="current-password" placeholder="رمز عبور"></label></div>`,async()=>{const email=$('accountEmail').value.trim(),password=$('accountPass').value;if(!email||!password)return showToast('ایمیل و رمز عبور را وارد کن',true);try{const r=await api('/api/login',{method:'POST',body:JSON.stringify({email,password})});let list=getAccounts().filter(x=>x.email!==email);list.unshift({email,username:r.user?.username||email.split('@')[0],display_name:r.user?.display_name||email.split('@')[0],avatar:r.user?.avatar||'',token:r.token});saveAccounts(list);closeModal();showToast('حساب اضافه شد ✓');updateAccountBadge()}catch(e){showToast(e.message,true)}});$('modalOk').textContent='افزودن حساب';$('modalCancel').textContent='لغو';
+    const a=getAccounts();
+    if(a.length>=3)return showToast('حداکثر ۳ حساب مجاز است',true);
+    rememberCurrentAccount();
+    openModal('👥 افزودن حساب',`<div class="account-auth-panel">
+      <div class="account-auth-tabs"><button type="button" class="active" data-account-tab="login">ورود</button><button type="button" data-account-tab="register">ثبت‌نام</button></div>
+      <form id="accountLoginForm" class="account-auth-form"><input id="accountLoginEmail" type="email" autocomplete="email" placeholder="ایمیل" required><input id="accountLoginPass" type="password" autocomplete="current-password" placeholder="رمز عبور" required><button type="submit" class="primary big-btn">ورود به حساب</button></form>
+      <form id="accountRegisterForm" class="account-auth-form hidden"><input id="accountRegName" placeholder="نام نمایشی" required><input id="accountRegEmail" type="email" autocomplete="email" placeholder="ایمیل" required><input id="accountRegPass" type="password" autocomplete="new-password" placeholder="رمز عبور (حداقل ۶ کاراکتر)" required><button type="submit" class="primary big-btn">ساخت حساب</button></form>
+      <small class="account-auth-note">حساب فعلی حفظ می‌شود و بعد از ورود/ثبت‌نام می‌توانی بین حداکثر ۳ حساب جابه‌جا شوی.</small>
+    </div>`,()=>{});
+    $('modalOk').classList.add('hidden');$('modalCancel').textContent='لغو';
+    const tabs=document.querySelectorAll('[data-account-tab]');
+    tabs.forEach(b=>b.onclick=()=>{tabs.forEach(x=>x.classList.toggle('active',x===b));$('accountLoginForm').classList.toggle('hidden',b.dataset.accountTab!=='login');$('accountRegisterForm').classList.toggle('hidden',b.dataset.accountTab!=='register')});
+    const activate=async r=>{
+      let list=getAccounts().filter(x=>x.username!==r.user?.username && x.email!==r.user?.email);
+      list.unshift({email:r.user?.email||'',username:r.user?.username||'',display_name:r.user?.display_name||'کاربر',avatar:r.user?.avatar||'',token:r.token});
+      saveAccounts(list);
+      token=r.token;localStorage.setItem('zento_token',token);
+      closeModal();await boot();showToast('حساب با موفقیت اضافه و فعال شد ✓');
+    };
+    $('accountLoginForm').onsubmit=async e=>{e.preventDefault();try{const r=await api('/api/login',{method:'POST',body:JSON.stringify({email:$('accountLoginEmail').value.trim(),password:$('accountLoginPass').value})});await activate(r)}catch(e){showToast(e.message,true)}};
+    $('accountRegisterForm').onsubmit=async e=>{e.preventDefault();try{const r=await api('/api/register',{method:'POST',body:JSON.stringify({displayName:$('accountRegName').value.trim(),email:$('accountRegEmail').value.trim(),password:$('accountRegPass').value})});await activate(r)}catch(e){showToast(e.message,true)}};
   }
+
   function setupSupportAndAccounts(){
     $('drawerSupport')?.addEventListener('click',()=>{closeDrawer();renderSupportCenter()});
     $('drawerAccounts')?.addEventListener('click',()=>{closeDrawer();renderAccounts()});

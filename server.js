@@ -620,7 +620,22 @@ io.on('connection', async socket => {
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
-      const reactions=m.reactions||{}; const arr=Array.isArray(reactions[emoji])?reactions[emoji]:[]; const i=arr.indexOf(uid); if(i>=0)arr.splice(i,1);else arr.push(uid); if(arr.length)reactions[emoji]=arr;else delete reactions[emoji];
+      const reactions=m.reactions||{};
+      // A user may have only one reaction on each message. Selecting another emoji
+      // removes the previous one; selecting the same emoji again toggles it off.
+      let hadSame=false;
+      for(const key of Object.keys(reactions)){
+        const arr=Array.isArray(reactions[key])?reactions[key]:[];
+        if(arr.includes(uid)){
+          if(key===emoji) hadSame=true;
+          reactions[key]=arr.filter(id=>Number(id)!==Number(uid));
+          if(!reactions[key].length) delete reactions[key];
+        }
+      }
+      if(!hadSame){
+        if(!Array.isArray(reactions[emoji])) reactions[emoji]=[];
+        reactions[emoji].push(uid);
+      }
       const rr=await q('UPDATE messages SET reactions=$1 WHERE id=$2 RETURNING reactions',[JSON.stringify(reactions),mid]); io.to('conv:'+m.conversation_id).emit('reaction',{messageId:mid,reactions:rr.rows[0].reactions});
     }catch(e){console.error('socket react',e)} });
   socket.on('delete_message', async d => { try {
