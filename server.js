@@ -609,6 +609,7 @@ io.on('connection', async socket => {
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
+  socket.on('call:invite', d => { const to=Number(d.to); if(!to||to===uid)return; io.to('user:'+to).emit('call:invite',{from:uid,video:!!d.video,conversationId:d.fromConversation||null}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
