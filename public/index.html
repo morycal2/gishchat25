@@ -21,7 +21,7 @@
   <div class="search-wrap"><span>⌕</span><input id="search" class="search" placeholder="جستجوی کاربر یا گفتگو"><button id="clearSearch" class="search-clear hidden">×</button></div><div id="userResults" class="results"></div><div id="storyTopBar" class="story-top-bar" aria-label="استوری‌ها"></div>
   <div class="chat-tabs"><button class="active" data-filter="all">همه</button><button data-filter="direct">خصوصی</button><button data-filter="group">گروه‌ها</button><button data-filter="channel">کانال‌ها</button></div>
   <div class="section-title"><span>گفتگوها</span><div class="section-title-actions"><button id="archivedChatsBtn" class="mini-plus" title="بایگانی شده‌ها">🗃️</button><button id="newChatMenu" class="mini-plus">＋</button></div></div><div id="chats" class="chats"></div>
-  <div class="sidebar-footer"><button id="drawerSavedSide">🔖 ذخیره‌شده‌ها</button><button id="logout" class="logout">خروج</button></div><nav class="mobile-home-nav" aria-label="ناوبری اصلی"><button class="active" data-home-nav="chats"><span>💬</span><small>پیام‌رسان</small></button><button data-home-nav="contacts"><span>👥</span><small>مخاطبین</small></button><button data-home-nav="calls"><span>☎</span><small>تماس‌ها</small></button><button data-home-nav="stories"><span>◉</span><small>استوری</small></button><button data-home-nav="settings"><span>⚙</span><small>تنظیمات</small></button></nav>
+  <nav class="mobile-home-nav" aria-label="ناوبری اصلی"><button data-home-nav="movies"><span>🎬</span><small>فیلم</small></button><button data-home-nav="showcase"><span>▣</span><small>ویترین</small></button><button data-home-nav="rubino"><span>◎</span><small>روبینو</small></button><button class="active" data-home-nav="chats"><span>✉</span><small>پیام‌رسان</small></button><button data-home-nav="home"><span>⌂</span><small>خانه</small></button></nav>
 </aside>
 <main class="chat">
   <header class="chat-head"><button id="backToChats" class="head-btn chat-back-btn" aria-label="بازگشت به گفتگوها">‹</button><button id="mobileMenu" class="head-btn mobile-only">☰</button><div id="chatAvatar" class="avatar">گ</div><div class="head-info"><b id="chatTitle">زنتو</b><small id="chatStatus">یک گفتگو را انتخاب کنید</small></div><div class="head-actions"><button class="head-btn" id="chatSearch">⌕</button><button class="head-btn" id="callAudio" title="تماس صوتی">☎</button><button class="head-btn" id="callVideo" title="تماس تصویری">▣</button><button class="head-btn" id="chatMore">•••</button></div></header>
@@ -42,7 +42,7 @@
 
 <div id="adminModal" class="modal hidden"><div class="modal-card admin-card"><div class="modal-head"><h3>مدیریت گروه / کانال</h3><button id="closeAdmin">×</button></div><div class="admin-summary" id="adminSummary"></div><div class="admin-tabs"><button class="active" data-admin-tab="overview">نمای کلی</button><button data-admin-tab="members">اعضا</button><button data-admin-tab="admins">ادمین‌ها</button><button data-admin-tab="permissions">مجوزها</button><button data-admin-tab="info">اطلاعات</button></div><div id="adminBody"></div></div></div>
 
-<div id="savedModal" class="modal hidden"><div class="saved-shell"><header class="saved-head"><button id="closeSaved">×</button><div class="avatar">🔖</div><div><b>پیام‌های ذخیره‌شده</b><small>فضای شخصی شما</small></div><input id="savedSearch" placeholder="جستجو در ذخیره‌شده‌ها..." class="saved-search"></header><div id="savedList" class="saved-list"></div><form id="savedComposer" class="composer saved-composer"><input id="savedFile" type="file" hidden accept="image/*,video/*,audio/*,.gif,.webp,.pdf,.zip,.txt"><button id="savedAttach" type="button" class="tool">📎</button><input id="savedText" autocomplete="off" placeholder="پیامی برای خودت بنویس..."><button class="send" type="submit">➤</button></form></div></div>
+<div id="savedModal" class="modal hidden saved-chat-modal"><div class="saved-shell"><header class="saved-head"><button id="closeSaved" aria-label="بازگشت">‹</button><div class="avatar">🔖</div><div class="saved-head-info"><b>پیام‌های ذخیره‌شده</b><small>فضای شخصی شما · گفتگوی خصوصی</small></div><input id="savedSearch" placeholder="جستجو در پیام‌ها..." class="saved-search"> <span class="saved-chat-status">خصوصی</span></header><div id="savedList" class="saved-list"></div><form id="savedComposer" class="composer saved-composer"><input id="savedFile" type="file" hidden accept="image/*,video/*,audio/*,.gif,.webp,.pdf,.zip,.txt"><button id="savedAttach" type="button" class="tool">📎</button><input id="savedText" autocomplete="off" placeholder="پیامی برای خودت بنویس..."><button class="send" type="submit">➤</button></form></div></div>
 
 <div id="recordingPanel" class="recording-panel hidden" aria-hidden="true">
   <div class="recording-card">
@@ -82,5 +82,5 @@
   </div>
 </div>
 <input id="avatarFile" type="file" hidden accept="image/jpeg,image/png,image/webp,image/gif">
-<script src="app.js?v=96"></script>
+<script src="app.js?v=97"></script>
 </body></html>

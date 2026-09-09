@@ -178,3 +178,33 @@ body.dark .story-person{background:#1b2732}body.dark .premium-profile-hero,body.
 body.dark .mobile-home-nav{background:rgba(23,33,43,.96)}
 body.dark .mobile-home-nav button.active{background:#1d3947}
 body.dark .chat-back-btn:hover{background:#202b36}
+
+/* v4.9 — Rubika-style mobile bottom navigation + Saved Messages as a private chat */
+.sidebar-footer{display:none!important}
+.mobile-home-nav{direction:rtl}
+@media(max-width:850px){
+  .mobile-home-nav{height:76px;padding:5px 4px calc(5px + env(safe-area-inset-bottom));grid-template-columns:repeat(5,1fr);border-top:1px solid rgba(120,145,160,.18)}
+  .mobile-home-nav button{position:relative;border-radius:13px;gap:2px;font-size:21px;min-width:0}
+  .mobile-home-nav button span{line-height:1}
+  .mobile-home-nav button small{font-size:9px;font-weight:600;line-height:1.2}
+  .mobile-home-nav button.active{background:transparent;color:var(--accent)}
+  .mobile-home-nav button.active:before{content:'';position:absolute;top:2px;width:42px;height:3px;border-radius:99px;background:var(--accent)}
+  .mobile-home-nav button.active span{transform:translateY(1px) scale(1.05)}
+}
+.saved-chat-modal{background:var(--bg)!important;backdrop-filter:none!important;padding:0!important;place-items:stretch!important}
+.saved-chat-modal .saved-shell{width:100vw!important;height:100dvh!important;max-width:none!important;max-height:none!important;border-radius:0!important;display:flex;flex-direction:column;background:radial-gradient(circle at 20% 20%,rgba(255,255,255,.72),transparent 35%),#dce8ef;box-shadow:none;overflow:hidden}
+.saved-chat-modal .saved-head{height:72px;min-height:72px;padding:9px 18px;background:rgba(255,255,255,.88);backdrop-filter:blur(20px);border-bottom:1px solid rgba(200,215,225,.65);z-index:2}
+.saved-chat-modal .saved-head>button{width:42px;height:42px;border-radius:12px;background:transparent;font-size:34px;line-height:1;color:var(--text)}
+.saved-chat-modal .saved-head .avatar{width:46px;height:46px;flex-basis:46px;border-radius:50%}
+.saved-chat-modal .saved-head-info{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.saved-chat-modal .saved-head-info b{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.saved-chat-modal .saved-head-info small{font-size:9px;color:#2aa56b}
+.saved-chat-modal .saved-chat-status{font-size:9px;color:var(--muted);padding:6px 9px;border-radius:10px;background:rgba(128,128,128,.09)}
+.saved-chat-modal .saved-search{position:absolute;top:76px;right:16px;width:220px;height:34px;opacity:0;pointer-events:none}
+.saved-chat-modal .saved-list{flex:1;min-height:0;overflow:auto;padding:22px 8%;background-image:radial-gradient(rgba(110,140,155,.16) 1px,transparent 1px);background-size:22px 22px}
+.saved-chat-modal .saved-list:before{content:'پیام‌های ذخیره‌شده';display:block;width:max-content;max-width:90%;margin:0 auto 14px;padding:6px 11px;border-radius:10px;background:rgba(255,255,255,.72);color:var(--muted);font-size:9px}
+.saved-chat-modal .bubble-row{margin:5px 0}
+.saved-chat-modal .saved-composer{margin:9px 6%;padding:6px 8px;background:rgba(255,255,255,.92);border-radius:18px;box-shadow:0 12px 32px rgba(20,50,70,.12);flex:0 0 auto}
+@media(max-width:850px){.saved-chat-modal .saved-composer{margin:8px 5px;padding-bottom:calc(10px + env(safe-area-inset-bottom))}.saved-chat-modal .saved-list{padding:16px 5% 10px}}
+body.dark .saved-chat-modal .saved-head{background:rgba(23,33,43,.94)}
+body.dark .saved-chat-modal .saved-shell{background:#17212b}
