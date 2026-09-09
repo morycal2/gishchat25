@@ -208,3 +208,23 @@ body.dark .chat-back-btn:hover{background:#202b36}
 @media(max-width:850px){.saved-chat-modal .saved-composer{margin:8px 5px;padding-bottom:calc(10px + env(safe-area-inset-bottom))}.saved-chat-modal .saved-list{padding:16px 5% 10px}}
 body.dark .saved-chat-modal .saved-head{background:rgba(23,33,43,.94)}
 body.dark .saved-chat-modal .saved-shell{background:#17212b}
+/* v4.10 premium navigation + floating message actions */
+.mobile-home-nav{grid-template-columns:repeat(6,1fr)!important;gap:4px;box-shadow:0 -8px 28px rgba(25,55,75,.08)}
+.mobile-home-nav button{font-family:inherit;transition:transform .18s ease,background .18s ease,color .18s ease;position:relative;overflow:hidden}
+.mobile-home-nav button span{width:32px;height:32px;display:grid;place-items:center;border-radius:11px;background:rgba(120,150,170,.08);font-size:19px;line-height:1;box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
+.mobile-home-nav button.active span{background:linear-gradient(135deg,rgba(34,158,217,.18),rgba(108,92,231,.16));box-shadow:0 6px 16px rgba(34,158,217,.14)}
+.mobile-home-nav button:active{transform:scale(.94)}
+@media(max-width:850px){.mobile-home-nav{height:78px!important}.mobile-home-nav button small{font-size:8px!important}.mobile-home-nav button span{width:31px;height:31px;font-size:18px}}
+body.dark .mobile-home-nav button span{background:rgba(255,255,255,.06);box-shadow:none}
+
+/* Message actions live in the compact floating menu now */
+.msg-actions{display:none!important}
+.saved-chat-item{border:1px solid rgba(34,158,217,.12)!important;background:linear-gradient(135deg,rgba(34,158,217,.055),rgba(108,92,231,.045))!important}
+.saved-chat-item .saved-avatar{background:linear-gradient(135deg,#ffe59a,#ffb84d)!important;box-shadow:0 7px 18px rgba(245,170,50,.22)}
+.saved-chat-item.saved-active{outline:2px solid rgba(34,158,217,.12)}
+
+.message-context-menu{min-width:210px!important;border-radius:16px!important;padding:7px!important;box-shadow:0 22px 70px rgba(10,30,50,.28)!important}
+.message-context-menu button{min-height:38px;border-radius:10px!important;gap:10px!important}
+.message-context-menu button:first-letter{font-size:16px}
+.message-context-menu .quick-reactions button{min-height:34px!important;border-radius:50%!important;background:rgba(34,158,217,.06)!important}
+.message-context-menu .quick-reactions button:hover{transform:translateY(-2px) scale(1.06);background:rgba(34,158,217,.13)!important}
