@@ -328,6 +328,59 @@ app.post('/api/conversations/bot', auth, async (req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'باز کردن گفتگوی ربات ناموفق بود'})}
 });
 
+// Deliver incoming user messages to bots that are members of the conversation.
+// This must never make the normal message endpoint fail: bot delivery is best-effort.
+async function dispatchBotUpdateForMessage(message) {
+  try {
+    if (!message || message.bot_id) return;
+    const cid = Number(message.conversation_id);
+    const senderId = Number(message.sender_id);
+    if (!cid || !senderId) return;
+    const r = await q(`SELECT b.*
+      FROM bots b
+      JOIN conversation_members cm ON cm.user_id=b.bot_user_id
+      WHERE cm.conversation_id=$1 AND b.bot_user_id IS NOT NULL AND b.bot_user_id<>$2`, [cid, senderId]);
+    if (!r.rowCount) return;
+
+    const update = {
+      update_id: Number(message.id),
+      message: {
+        message_id: Number(message.id),
+        chat: { id: cid },
+        from: {
+          id: Number(message.sender_id),
+          is_bot: false,
+          first_name: message.display_name || message.username || 'کاربر',
+          username: message.username || ''
+        },
+        date: Math.floor(new Date(message.created_at || Date.now()).getTime() / 1000),
+        text: message.text || '',
+        reply_to_message: message.reply_to ? { message_id: Number(message.reply_to) } : undefined
+      }
+    };
+
+    await Promise.allSettled(r.rows.map(async bot => {
+      await q('INSERT INTO bot_updates(bot_id,update_json) VALUES($1,$2)', [Number(bot.id), JSON.stringify(update)]);
+      const webhook = String(bot.webhook_url || '').trim();
+      if (webhook && /^https:\/\//i.test(webhook)) {
+        try {
+          await fetch(webhook, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(update),
+            signal: AbortSignal.timeout(5000)
+          });
+        } catch (e) {
+          console.warn('bot webhook delivery failed', bot.username, e.message);
+        }
+      }
+    }));
+  } catch (e) {
+    // Bot update delivery is intentionally isolated from normal chat delivery.
+    console.error('dispatchBotUpdateForMessage', e);
+  }
+}
+
 app.post('/api/messages', auth, async (req, res) => {
   try {
     const cid = Number(req.body.conversationId); const check = await canMessage(cid, req.user.id);
@@ -350,7 +403,7 @@ app.post('/api/messages', auth, async (req, res) => {
     }
     const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
     io.to('conv:' + cid).emit('message', out);
-    dispatchBotUpdateForMessage(out);
+    void dispatchBotUpdateForMessage(out);
     res.json(out);
   } catch (e) { console.error(e); res.status(500).json({ error: 'ارسال پیام ناموفق بود' }); }
 });
@@ -665,7 +718,7 @@ io.on('connection', async socket => {
         io.to('conv:'+cid).emit('message',userOut);
         if(await handleBotFatherCommand(cid,uid,text)) return;
       }
-      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out); dispatchBotUpdateForMessage(out);
+      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out); void dispatchBotUpdateForMessage(out);
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
