@@ -368,21 +368,14 @@ function stage1Style(){if(document.getElementById('stage1-style'))return;const s
 async function stage1Load(){try{const p=await api('/api/preferences');stage1ApplyTheme(p.theme)}catch{}try{stage1Folders=await api('/api/folders')}catch{stage1Folders=[]}try{stage1Profiles=await api('/api/profiles')}catch{stage1Profiles=[]}if(stage1Profiles.length)stage1Profiles.forEach(p=>{if(p.is_default)stage1ProfileByConv._default=p.id});stage1RenderFolders()}
 function ensureStoryBar(){return $('storyTopBar')}
 async function renderStoryTopBar(){
-  // Story implementation lives in the premium-story IIFE below. Use explicit
-  // window hooks here so the top bar never crashes because of IIFE scope.
-  const load=window.__zentoLoadStories;
-  const ring=window.__zentoStoryRing;
-  const open=window.__zentoOpenStories;
-  const compose=window.__zentoOpenStoryComposer;
-  if(typeof load!=='function'||typeof ring!=='function'||typeof open!=='function'||typeof compose!=='function') return;
-  let groups=[];try{groups=await load()}catch(e){console.warn('stories feed',e);return}
+  let groups=[];try{groups=await loadStories()}catch{}
   const html=`<button class="story-top-card mine" id="storyTopAdd" type="button"><span class="story-top-add-ring">＋</span><span>استوری من</span></button>`+
-    groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${ring(g,'story-top-ring')}<span>${Number(g.user_id)===Number(me?.id)?'استوری من':esc(g.display_name)}</span></button>`).join('');
+    groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${storyRing(g,'story-top-ring')}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');
   [$('storyTopBar'),$('chatStoryTopBar')].filter(Boolean).forEach(b=>{
     b.innerHTML=html;
     b.classList.add('story-bar-ready');
-    b.querySelector('#storyTopAdd')?.addEventListener('click',compose);
-    b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>open(Number(x.dataset.storyUser)));
+    b.querySelector('#storyTopAdd')?.addEventListener('click',openStoryComposer);
+    b.querySelectorAll('[data-story-user]').forEach(x=>x.onclick=()=>openStories(Number(x.dataset.storyUser)));
   });
 }
 function stage1EnsureFolderBar(){let b=$('stage1Folders');if(!b&&$('chats')){ $('chats').insertAdjacentHTML('beforebegin','<div id="stage1Folders" class="stage1-folders"></div>');b=$('stage1Folders')}return b}
@@ -393,10 +386,10 @@ function stage1RenderConvs(){convs.forEach(c=>{if(c._settingsLoaded)return;c._se
 const _baseStage1RenderConvs=stage1RenderConvs;
 stage1RenderConvs=function(){_baseStage1RenderConvs();renderStoryTopBar().catch(e=>console.warn('stories',e));};
 renderConvs=stage1RenderConvs;
-const originalOpenConv= openConv;
+const originalOpenConv=openConv;
 const _zentoOpenConvWithStories=originalOpenConv;
-const openConvWithStories=async function(id){const r=await _zentoOpenConvWithStories(id);setTimeout(()=>renderStoryTopBar().catch(()=>{}),80);return r};
-async function stage1OpenConv(id){const c=convs.find(x=>Number(x.id)===Number(id));if(!c)return;try{const st=await api('/api/conversations/'+id+'/lock');c.stage1Locked=!!st.locked;if(st.locked){const pin=prompt('🔐 این گفتگو قفل است. PIN را وارد کنید:');if(pin===null)return;await api('/api/conversations/'+id+'/unlock',{method:'POST',body:JSON.stringify({pin})})}}catch(e){showToast(e.message,true);return}try{const p=await api('/api/conversations/'+id+'/profile');if(p)stage1ProfileByConv[id]=p.id}catch{}return openConvWithStories(id)}
+originalOpenConv=async function(id){const r=await _zentoOpenConvWithStories(id);setTimeout(()=>renderStoryTopBar().catch(()=>{}),80);return r};
+async function stage1OpenConv(id){const c=convs.find(x=>Number(x.id)===Number(id));if(!c)return;try{const st=await api('/api/conversations/'+id+'/lock');c.stage1Locked=!!st.locked;if(st.locked){const pin=prompt('🔐 این گفتگو قفل است. PIN را وارد کنید:');if(pin===null)return;await api('/api/conversations/'+id+'/unlock',{method:'POST',body:JSON.stringify({pin})})}}catch(e){showToast(e.message,true);return}try{const p=await api('/api/conversations/'+id+'/profile');if(p)stage1ProfileByConv[id]=p.id}catch{}return originalOpenConv(id)}
 openConv=stage1OpenConv;
 async function stage1LockMenu(c){const st=await api('/api/conversations/'+c.id+'/lock');if(st.locked){if(confirm('قفل این گفتگو برداشته شود؟')){const pin=prompt('PIN فعلی را وارد کنید:');if(pin===null)return;try{await api('/api/conversations/'+c.id+'/unlock',{method:'POST',body:JSON.stringify({pin})});await api('/api/conversations/'+c.id+'/lock',{method:'DELETE'});c.stage1Locked=false;renderConvs();showToast('قفل برداشته شد')}catch(e){showToast(e.message,true)}}}else{const a=prompt('یک PIN چهار تا هشت رقمی وارد کنید:');if(!a)return;const b=prompt('PIN را دوباره وارد کنید:');if(a!==b)return showToast('PINها یکسان نیستند',true);try{await api('/api/conversations/'+c.id+'/lock',{method:'POST',body:JSON.stringify({pin:a})});c.stage1Locked=true;renderConvs();showToast('گفتگو قفل شد 🔐')}catch(e){showToast(e.message,true)}}}
 function removeChatContextMenu(){document.getElementById('chatContextMenu')?.remove()}
@@ -420,7 +413,7 @@ const _stage1Boot=boot;boot=async()=>{await _stage1Boot();if(token&&me)await sta
 
 boot().then(()=>window.stage2HandleMessageHash?.()).catch(e=>console.error('boot',e));
 
-document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a){e.preventDefault();const u=a.dataset.username;api('/api/users?q='+encodeURIComponent(u)).then(us=>{const x=us.find(z=>String(z.username).toLowerCase()===String(u).toLowerCase());if(x)openUserProfile(x.id);else showToast('کاربر پیدا نشد',true)}).catch(()=>{})}});
+document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a){e.preventDefault();const u=a.dataset.username;api('/api/bots/resolve/'+encodeURIComponent(u)).then(x=>openUserProfile(x.id)).catch(()=>api('/api/users?q='+encodeURIComponent(u)).then(us=>{const x=us.find(z=>String(z.username).toLowerCase()===String(u).toLowerCase());if(x)openUserProfile(x.id);else showToast('کاربر یا ربات پیدا نشد',true)})).catch(()=>showToast('کاربر یا ربات پیدا نشد',true))}});
 
 /* ===== Zento Stage 3 ===== */
 (function(){
@@ -515,11 +508,33 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
     $('s4Bot').onclick=botsModal;$('s4Mini').onclick=miniAppsModal;$('s4Game').onclick=()=>{if(!current)return showToast('اول یک گفتگو را انتخاب کن',true);gameModal(current.id)};$('s4AI').onclick=aiModal;$('s4Pwa').onclick=installPwa;$('s4Call').onclick=()=>{if(call)toggleScreenShare();else showToast('اول یک تماس تصویری برقرار کن',true)};
   }
   async function botsModal(){
-    try{const bots=await api('/api/bots');stage4Modal('🤖 ربات‌های زنتو',`<div class="s4-modal"><div class="feature-intro">ربات بساز و از Bot API برای ارسال پیام استفاده کن.</div><div class="s4-form"><input id="s4BotName" placeholder="نام ربات"><input id="s4BotUser" placeholder="username (انگلیسی)"><textarea id="s4BotDesc" placeholder="توضیحات"></textarea><input id="s4BotWebhook" placeholder="Webhook URL (اختیاری)"><button id="s4CreateBot" class="primary">ساخت ربات</button></div><div class="s4-list">${bots.map(b=>`<div class="s4-item"><div><b>${esc(b.name)} <span class="s4-badge">@${esc(b.username)}</span></b><small>${esc(b.description||'بدون توضیحات')}</small><div class="s4-token">${esc(b.token)}</div><small>POST /api/bot/&lt;TOKEN&gt;/send</small></div><button class="danger" data-s4-delbot="${b.id}">حذف</button></div>`).join('')||'<div class="feature-intro">هنوز رباتی نساخته‌ای.</div>'}</div></div>`,{hideOk:true});
-      $('s4CreateBot').onclick=async()=>{try{const b=await api('/api/bots',{method:'POST',body:JSON.stringify({name:$('s4BotName').value,username:$('s4BotUser').value,description:$('s4BotDesc').value,webhookUrl:$('s4BotWebhook').value})});showToast('ربات ساخته شد 🤖');botsModal();}catch(e){showToast(e.message,true)}};
+    try{
+      const bots=await api('/api/bots');
+      const card=b=>`<div class="s4-item bot-manager-item"><div class="bot-manager-main">${b.avatar?`<img class="bot-manager-avatar" src="${esc(backendUrl(b.avatar))}">`:`<div class="bot-manager-avatar bot-fallback">🤖</div>`}<div><b>${esc(b.name)} <span class="s4-badge">@${esc(b.username)}</span></b><small>${esc(b.description||'بدون توضیحات')}</small><div class="s4-token">${esc(b.token)}</div><small>Bot API: /api/bot/&lt;TOKEN&gt;/sendMessage</small></div></div><div class="bot-manager-actions"><button data-s4-settings="${b.id}">⚙️ تنظیمات</button><button data-s4-api="${b.id}">⌘ API</button><button class="danger" data-s4-delbot="${b.id}">حذف</button></div></div>`;
+      stage4Modal('🤖 ربات‌های زنتو',`<div class="s4-modal"><div class="feature-intro">ربات‌های ساخته‌شده با BotFather را مدیریت کن؛ پروفایل، توضیحات، وبهوک، دستورات و Bot API همگی از همین پنل در دسترس‌اند.</div><div class="s4-form"><input id="s4BotName" placeholder="نام ربات"><input id="s4BotUser" placeholder="username مثل my_zento_bot"><textarea id="s4BotDesc" placeholder="توضیحات"></textarea><input id="s4BotWebhook" placeholder="Webhook URL (اختیاری، فقط HTTPS)"><button id="s4CreateBot" class="primary">ساخت ربات</button></div><div class="s4-list">${bots.map(card).join('')||'<div class="feature-intro">هنوز رباتی نساخته‌ای.</div>'}</div></div>`,{hideOk:true});
+      $('s4CreateBot').onclick=async()=>{try{await api('/api/bots',{method:'POST',body:JSON.stringify({name:$('s4BotName').value,username:$('s4BotUser').value,description:$('s4BotDesc').value,webhookUrl:$('s4BotWebhook').value})});showToast('ربات ساخته شد 🤖');botsModal()}catch(e){showToast(e.message,true)}};
       document.querySelectorAll('[data-s4-delbot]').forEach(x=>x.onclick=async()=>{if(!confirm('این ربات حذف شود؟'))return;try{await api('/api/bots/'+x.dataset.s4Delbot,{method:'DELETE'});botsModal()}catch(e){showToast(e.message,true)}});
+      document.querySelectorAll('[data-s4-settings]').forEach(x=>x.onclick=()=>botSettingsModal(bots.find(b=>Number(b.id)===Number(x.dataset.s4Settings))));
+      document.querySelectorAll('[data-s4-api]').forEach(x=>x.onclick=()=>botApiModal(bots.find(b=>Number(b.id)===Number(x.dataset.s4Api))));
     }catch(e){showToast(e.message,true)}
   }
+  async function botSettingsModal(bot){
+    if(!bot)return;
+    stage4Modal(`⚙️ تنظیمات @${bot.username}`,`<div class="s4-modal"><div class="bot-settings-hero">${bot.avatar?`<img src="${esc(backendUrl(bot.avatar))}" class="bot-settings-avatar">`:'<div class="bot-settings-avatar bot-fallback">🤖</div>'}<div><b>${esc(bot.name)}</b><small>@${esc(bot.username)}</small></div></div><div class="s4-form"><label>نام ربات<input id="bsName" value="${esc(bot.name)}"></label><label>توضیحات<textarea id="bsDesc">${esc(bot.description||'')}</textarea></label><label>عکس پروفایل<input id="bsAvatarFile" type="file" accept="image/*"></label><label>یا لینک عکس HTTPS<input id="bsAvatarUrl" value="${esc(bot.avatar||'')}" placeholder="https://..."></label><label>Webhook URL<input id="bsWebhook" value="${esc(bot.webhook_url||'')}" placeholder="https://example.com/zento-webhook"></label><button id="bsSave" class="primary">ذخیره تنظیمات</button></div><div class="s4-actions"><button id="bsCommands">🧩 مدیریت دستورات</button><button id="bsApi">⌘ راهنمای API</button></div></div>`,{hideOk:true});
+    $('bsSave').onclick=async()=>{try{let avatar=$('bsAvatarUrl').value.trim();const f=$('bsAvatarFile').files[0];if(f){const fd=new FormData();fd.append('file',f);const up=await api('/api/upload',{method:'POST',body:fd});avatar=up.url}const b=await api('/api/bots/'+bot.id,{method:'PATCH',body:JSON.stringify({name:$('bsName').value,description:$('bsDesc').value,avatar,webhookUrl:$('bsWebhook').value})});showToast('تنظیمات ربات ذخیره شد');botSettingsModal(b)}catch(e){showToast(e.message,true)}};
+    $('bsCommands').onclick=()=>botCommandsModal(bot);
+    $('bsApi').onclick=()=>botApiModal(bot);
+  }
+  async function botCommandsModal(bot){
+    try{const cmds=await api('/api/bots/'+bot.id+'/commands');stage4Modal(`🧩 دستورات @${bot.username}`,`<div class="s4-modal"><div class="feature-intro">برای هر دستور یک پاسخ خودکار بساز. ربات با /command آن را اجرا می‌کند.</div><div class="s4-form"><input id="bcCommand" placeholder="دستور مثل start"><textarea id="bcResponse" placeholder="پاسخ ربات"></textarea><button id="bcSave" class="primary">ذخیره دستور</button></div><div class="s4-list">${cmds.map(c=>`<div class="s4-item"><div><b>/${esc(c.command)}</b><small>${esc(c.response)}</small></div><button class="danger" data-bc-del="${esc(c.command)}">حذف</button></div>`).join('')||'<div class="feature-intro">دستوری ثبت نشده.</div>'}</div></div>`,{hideOk:true});$('bcSave').onclick=async()=>{try{await api('/api/bots/'+bot.id+'/commands',{method:'POST',body:JSON.stringify({command:$('bcCommand').value,response:$('bcResponse').value})});botCommandsModal(bot)}catch(e){showToast(e.message,true)}};document.querySelectorAll('[data-bc-del]').forEach(x=>x.onclick=async()=>{try{await api('/api/bots/'+bot.id+'/commands/'+encodeURIComponent(x.dataset.bcDel),{method:'DELETE'});botCommandsModal(bot)}catch(e){showToast(e.message,true)}})}catch(e){showToast(e.message,true)}
+  }
+  function botApiModal(bot){
+    if(!bot)return;
+    const base=location.origin;
+    const token=esc(bot.token);
+    stage4Modal(`⌘ Bot API · @${bot.username}`,`<div class="s4-modal"><div class="feature-intro">API آنلاین زنتو برای برنامه‌نویسی ربات؛ توکن را محرمانه نگه دار.</div><div class="s4-api-doc"><div><b>GET</b><code>${base}/api/bot/${token}/getMe</code><small>اطلاعات ربات</small></div><div><b>GET</b><code>${base}/api/bot/${token}/getUpdates</code><small>دریافت آپدیت‌ها در حالت polling</small></div><div><b>POST</b><code>${base}/api/bot/${token}/sendMessage</code><small>بدنه JSON: {"chat_id":123,"text":"سلام"}</small></div><div><b>POST</b><code>${base}/api/bot/${token}/setWebhook</code><small>بدنه JSON: {"url":"https://example.com/webhook"}</small></div><div><b>GET</b><code>${base}/api/bot/${token}/getWebhookInfo</code><small>وضعیت webhook</small></div><div><b>POST</b><code>${base}/api/bot/${token}/deleteWebhook</code><small>حذف webhook</small></div></div><div class="s4-token api-token">${esc(bot.token)}</div></div>`,{hideOk:true});
+  }
+
   function miniAppsModal(){
     stage4Modal('🚀 Mini Apps',`<div class="s4-modal"><div class="feature-intro">یک آدرس HTTPS از یک Mini App سازگار وارد کن. سایت مقصد باید اجازه نمایش در iframe بدهد.</div><div class="s4-form"><input id="s4MiniUrl" placeholder="https://example.com/app"><button id="s4OpenMini" class="primary">باز کردن Mini App</button></div><div class="s4-grid"><button class="s4-card" id="s4MiniGame"><b>🎮 بازی داخلی</b><small>باز کردن بازی دوز Real-time زنتو.</small></button><button class="s4-card" id="s4MiniTool"><b>🧮 ابزار نمونه</b><small>یک ماشین‌حساب سبک به‌عنوان Mini App.</small></button></div></div>`,{hideOk:true});
     $('s4OpenMini').onclick=()=>{const u=$('s4MiniUrl').value.trim();if(!/^https:\/\//i.test(u))return showToast('آدرس باید HTTPS باشد',true);stage4Modal('🚀 Mini App',`<div class="s4-modal"><iframe class="s4-iframe" src="${esc(u)}" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe><div class="s4-actions"><button id="s4MiniNew">↗ باز کردن در صفحه جدید</button></div></div>`,{hideOk:true});$('s4MiniNew').onclick=()=>window.open(u,'_blank','noopener,noreferrer')};
@@ -661,12 +676,6 @@ function openStoryReplyComposer(st,g){
 }
   function storyStep(dir){const g=storyGroups[storyUserIndex];if(!g)return;if(storyItemIndex+dir>=0&&storyItemIndex+dir<g.stories.length){storyItemIndex+=dir;renderStory();return}let ni=storyUserIndex+dir;if(ni<0)ni=storyGroups.length-1;if(ni>=storyGroups.length)return closeStories();storyUserIndex=ni;storyItemIndex=dir>0?0:storyGroups[ni].stories.length-1;renderStory()}
   async function openStoryComposer(){openModal('📸 استوری جدید',`<div class="story-composer"><div class="story-composer-hero">عکس یا ویدیوی کوتاه خودت را برای ۲۴ ساعت منتشر کن.</div><label>رسانه<input id="storyFile" type="file" accept="image/*,video/mp4,video/webm,video/quicktime" required></label><label>متن روی استوری<input id="storyText" maxlength="500" placeholder="یک کپشن کوتاه…"></label></div>`,async()=>{const f=$('storyFile').files[0];if(!f)return showToast('یک عکس یا ویدیو انتخاب کن',true);const fd=new FormData();fd.append('story',f);fd.append('text',$('storyText').value||'');await api('/api/stories',{method:'POST',body:fd});closeModal();showToast('استوری منتشر شد ✓');loadStories()});$('modalOk').textContent='انتشار' }
-  // Expose story APIs to the top-bar renderer, which intentionally lives outside this IIFE.
-  window.__zentoLoadStories=loadStories;
-  window.__zentoStoryRing=storyRing;
-  window.__zentoOpenStories=openStories;
-  window.__zentoOpenStoryComposer=openStoryComposer;
-
   async function openStoriesPanel(){ensureStoryModal();const groups=await loadStories();const cards=groups.map(g=>`<button class="story-person ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}">${storyRing(g)}<span><b>${esc(g.display_name)}</b><small>${g.stories.length} استوری</small></span></button>`).join('');openModal('📸 استوری‌ها',`<div class="stories-list"><button id="newStoryBtn" class="story-add-card">＋ افزودن استوری</button>${cards||'<div class="empty">هنوز استوری فعالی نیست.</div>'}</div>`,()=>{});$('modalOk').classList.add('hidden');$('modalCancel').textContent='بستن';$('newStoryBtn').onclick=()=>{closeModal();openStoryComposer()};document.querySelectorAll('[data-story-user]').forEach(b=>b.onclick=()=>{closeModal();openStories(Number(b.dataset.storyUser))})}
   async function enhanceProfileData(u){const p=u||{};if(!p.photos||!p.songs||!p.stories){try{const r=await api('/api/public/users/'+encodeURIComponent(p.username)+'/profile');return r}catch{return p}}return p}
   function profileLink(u){return `${location.origin}/#/user/${encodeURIComponent(u.username)}`}

@@ -143,6 +143,15 @@ CREATE TABLE IF NOT EXISTS bot_commands (
  bot_id bigint NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
  command text NOT NULL, response text NOT NULL DEFAULT '', UNIQUE(bot_id,command)
 );
+CREATE TABLE IF NOT EXISTS botfather_sessions (
+ user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ step text NOT NULL DEFAULT 'idle',
+ pending_name text NOT NULL DEFAULT '',
+ pending_username text NOT NULL DEFAULT '',
+ pending_bot_id bigint REFERENCES bots(id) ON DELETE SET NULL,
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS botfather_sessions_updated_idx ON botfather_sessions(updated_at);
 
 -- Gish Chat v7.2 Stage 3: statistics, badges and advanced community management
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb;
