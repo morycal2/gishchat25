@@ -403,6 +403,7 @@ app.post('/api/messages', auth, async (req, res) => {
     }
     const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
     io.to('conv:' + cid).emit('message', out);
+    if(text && !fileUrl) void handleConfiguredBotCommand(cid, req.user.id, text);
     void dispatchBotUpdateForMessage(out);
     res.json(out);
   } catch (e) { console.error(e); res.status(500).json({ error: 'ارسال پیام ناموفق بود' }); }
@@ -718,7 +719,7 @@ io.on('connection', async socket => {
         io.to('conv:'+cid).emit('message',userOut);
         if(await handleBotFatherCommand(cid,uid,text)) return;
       }
-      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out); void dispatchBotUpdateForMessage(out);
+      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out); if(text&&!fileUrl) void handleConfiguredBotCommand(cid,uid,text); void dispatchBotUpdateForMessage(out);
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
@@ -944,7 +945,7 @@ app.delete('/api/bots/:id', auth, async (req,res)=>{
 });
 
 app.get('/api/bots/:id/commands', auth, async(req,res)=>{try{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});const r=await q('SELECT * FROM bot_commands WHERE bot_id=$1 ORDER BY command',[bot.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),bot_id:Number(x.bot_id)})))}catch(e){res.status(500).json({error:'دریافت دستورات ناموفق بود'})}});
-app.post('/api/bots/:id/commands', auth, async(req,res)=>{try{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});const command=String(req.body.command||'').trim().replace(/^\//,'').slice(0,32),response=String(req.body.response||'').trim().slice(0,4000);if(!/^[a-zA-Z0-9_]{1,32}$/.test(command))return res.status(400).json({error:'دستور نامعتبر است'});const r=await q('INSERT INTO bot_commands(bot_id,command,response) VALUES($1,$2,$3) ON CONFLICT(bot_id,command) DO UPDATE SET response=EXCLUDED.response RETURNING *',[bot.id,command,response]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){res.status(500).json({error:'ذخیره دستور ناموفق بود'})}});
+app.post('/api/bots/:id/commands', auth, async(req,res)=>{try{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});const command=String(req.body.command||'').trim().replace(/^\//,'').slice(0,32),response=String(req.body.response||'').trim().slice(0,4000),replyMarkup=req.body.replyMarkup&&typeof req.body.replyMarkup==='object'?req.body.replyMarkup:null;if(!/^[a-zA-Z0-9_]{1,32}$/.test(command))return res.status(400).json({error:'دستور نامعتبر است'});const r=await q('INSERT INTO bot_commands(bot_id,command,response,reply_markup) VALUES($1,$2,$3,$4) ON CONFLICT(bot_id,command) DO UPDATE SET response=EXCLUDED.response,reply_markup=EXCLUDED.reply_markup RETURNING *',[bot.id,command,response,replyMarkup?JSON.stringify(replyMarkup):null]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){console.error(e);res.status(500).json({error:'ذخیره دستور ناموفق بود'})}});
 app.delete('/api/bots/:id/commands/:command', auth, async(req,res)=>{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});await q('DELETE FROM bot_commands WHERE bot_id=$1 AND command=$2',[bot.id,String(req.params.command).replace(/^\//,'')]);res.json({ok:true})});
 
 // Telegram-style Bot API surface. Token is the only credential required by bot code.
@@ -960,13 +961,67 @@ async function botSendMessage(bot,chatId,text,replyMarkup=null){
   if(!(await botChatMember(bot,chatId)))return {ok:false,error_code:403,description:'Bot is not a member of this chat'};
   let markup=null;
   if(replyMarkup && typeof replyMarkup==='object'){
-    const kb=Array.isArray(replyMarkup.inline_keyboard)?replyMarkup.inline_keyboard:null;
-    if(kb) markup={inline_keyboard:kb.slice(0,8).map(row=>Array.isArray(row)?row.slice(0,4).map(b=>({text:String(b.text||'').slice(0,80),url:b.url?String(b.url).slice(0,500):undefined,callback_data:b.callback_data?String(b.callback_data).slice(0,128):undefined})):[]).filter(r=>r.length)};
+    const clean=(rows)=>Array.isArray(rows)?rows.slice(0,8).map(row=>Array.isArray(row)?row.slice(0,4).map(b=>({text:String(b?.text||'').slice(0,80),url:b?.url?String(b.url).slice(0,500):undefined,callback_data:b?.callback_data?String(b.callback_data).slice(0,128):undefined})).filter(x=>x.text):[]).filter(r=>r.length):[];
+    if(Array.isArray(replyMarkup.inline_keyboard)) markup={inline_keyboard:clean(replyMarkup.inline_keyboard)};
+    else if(Array.isArray(replyMarkup.keyboard)) markup={keyboard:clean(replyMarkup.keyboard),resize_keyboard:replyMarkup.resize_keyboard!==false,one_time_keyboard:!!replyMarkup.one_time_keyboard};
+    else if(replyMarkup.remove_keyboard) markup={remove_keyboard:true};
   }
   const out=await insertMessage({cid:Number(chatId),uid:Number(bot.bot_user_id),text:String(text||'').slice(0,5000),kind:'bot',botId:Number(bot.id),replyMarkup:markup});
   io.to('conv:'+Number(chatId)).emit('message',out);
   return {ok:true,result:{message_id:Number(out.id),chat:{id:Number(chatId)},from:{id:Number(bot.id),is_bot:true,first_name:bot.name,username:bot.username},text:out.text||'',reply_markup:markup}};
 }
+
+// Execute a bot command configured in the Zento Bot Manager. This keeps the
+// built-in command buttons useful even when the owner is not running a webhook.
+async function handleConfiguredBotCommand(cid, uid, rawText){
+  const text=String(rawText||'').trim();
+  if(!text.startsWith('/')) return false;
+  const command=text.split(/\s+/)[0].replace(/^\//,'').replace(/@[^\s]+$/,'').toLowerCase();
+  if(!command) return false;
+  const cr=await q(`SELECT b.*,bc.response,bc.reply_markup
+    FROM bots b
+    JOIN conversation_members cm ON cm.user_id=b.bot_user_id AND cm.conversation_id=$1
+    JOIN bot_commands bc ON bc.bot_id=b.id AND lower(bc.command)=lower($2)
+    WHERE b.bot_user_id IS NOT NULL AND b.bot_user_id<>$3
+    LIMIT 1`,[cid,command,uid]);
+  if(!cr.rowCount) return false;
+  const bot=cr.rows[0];
+  const out=await insertMessage({cid,uid:Number(bot.bot_user_id),text:String(bot.response||'').slice(0,5000),kind:'bot',botId:Number(bot.id),replyMarkup:bot.reply_markup||null});
+  io.to('conv:'+cid).emit('message',out);
+  return true;
+}
+
+// Inline button callback endpoint. The bot token is deliberately not exposed
+// to the browser; the message itself identifies the bot that owns the button.
+app.post('/api/messages/:id/bot-button', auth, async(req,res)=>{
+  try{
+    const mid=Number(req.params.id), buttonIndex=Number(req.body.buttonIndex);
+    const mr=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[mid]);
+    const m=mr.rows[0];
+    if(!m || !m.bot_id || !await isMember(m.conversation_id,req.user.id)) return res.status(404).json({error:'دکمه پیدا نشد'});
+    const markup=m.reply_markup||{};
+    const rows=Array.isArray(markup.inline_keyboard)?markup.inline_keyboard:[];
+    const flat=rows.flatMap((row,rowIndex)=>(Array.isArray(row)?row:[]).map((b,colIndex)=>({...b,rowIndex,colIndex})));
+    const b=flat.find(x=>x.rowIndex===Math.floor(buttonIndex/100) && x.colIndex===buttonIndex%100);
+    if(!b) return res.status(400).json({error:'دکمه نامعتبر است'});
+    const botR=await q('SELECT * FROM bots WHERE id=$1 LIMIT 1',[Number(m.bot_id)]); const bot=botR.rows[0];
+    if(!bot) return res.status(404).json({error:'ربات پیدا نشد'});
+    const callbackId=crypto.randomUUID();
+    const update={update_id:Number(m.id)*1000+Math.floor(Math.random()*999),callback_query:{id:callbackId,from:{id:Number(req.user.id),is_bot:false,first_name:req.user.display_name||req.user.username||'کاربر',username:req.user.username||''},message:{message_id:Number(m.id),chat:{id:Number(m.conversation_id)},from:{id:Number(bot.id),is_bot:true,first_name:bot.name,username:bot.username},text:m.text||''},data:String(b.callback_data||b.text||'').slice(0,128)}};
+    await q('INSERT INTO bot_updates(bot_id,update_json) VALUES($1,$2)',[Number(bot.id),JSON.stringify(update)]);
+    const webhook=String(bot.webhook_url||'').trim();
+    if(webhook && /^https:\/\//i.test(webhook)){
+      fetch(webhook,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(update),signal:AbortSignal.timeout(5000)}).catch(e=>console.warn('bot callback webhook failed',bot.username,e.message));
+    }
+    res.json({ok:true,result:true});
+  }catch(e){console.error('bot button',e);res.status(500).json({error:'اجرای دکمه ربات ناموفق بود'})}
+});
+
+app.post('/api/bot/:token/answerCallbackQuery', async(req,res)=>{
+  const b=await botByToken(req.params.token); if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});
+  res.json({ok:true,result:true});
+});
+
 app.post('/api/bot/:token/sendMessage', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.chat_id??req.body.conversationId),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({ok:false,error_code:400,description:'chat_id and text are required'});res.json(await botSendMessage(b,chatId,text,replyMarkup));}catch(e){console.error(e);res.status(500).json({ok:false,error_code:500,description:'Internal server error'})}});
 app.post('/api/bot/:token/send', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({error:'توکن ربات نامعتبر است'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.conversationId??req.body.chat_id),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({error:'conversationId/chat_id و text لازم است'});const result=await botSendMessage(b,chatId,text,replyMarkup);if(!result.ok)return res.status(result.error_code||403).json({error:result.description});res.json(result.result)}catch(e){console.error(e);res.status(500).json({error:'ارسال پیام ربات ناموفق بود'})}});
 
@@ -1264,8 +1319,10 @@ async function ensureStage4Schema(){
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     command TEXT NOT NULL, response TEXT NOT NULL DEFAULT '',
+    reply_markup JSONB,
     UNIQUE(bot_id,command)
   )`);
+  await q(`ALTER TABLE bot_commands ADD COLUMN IF NOT EXISTS reply_markup JSONB`);
   await q(`CREATE INDEX IF NOT EXISTS bots_owner_idx ON bots(owner_id)`);
 }
 

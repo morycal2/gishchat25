@@ -285,3 +285,31 @@ body.dark .support-panel textarea,body.dark .support-panel input,body.dark .supp
 @media(max-width:650px){.bot-manager-item{align-items:flex-start;flex-direction:column}.bot-manager-actions{width:100%;justify-content:flex-start}.bot-manager-actions button{flex:1}.s4-api-doc code{font-size:11px}}
 
 .bot-start-bar{padding:8px 14px;background:var(--panel,#fff);border-top:1px solid var(--border,#ddd)}.bot-start-bar button{width:100%;border:0;border-radius:14px;padding:11px 16px;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#6c5ce7,#00b894);color:#fff;box-shadow:0 6px 18px rgba(0,0,0,.12)}.bot-glass-buttons{margin-top:10px;display:flex;flex-direction:column;gap:7px}.bot-glass-row{display:flex;gap:7px}.bot-glass-btn{flex:1;min-width:0;padding:9px 12px;border-radius:12px;border:1px solid rgba(120,120,140,.28);background:rgba(255,255,255,.12);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);text-align:center;text-decoration:none;font-weight:700;cursor:pointer}.dark .bot-glass-btn{color:#fff;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16)}
+
+/* Zento Bot 4.18 — professional button/keyboard UI */
+.bot-keyboard{margin-top:12px;display:grid;gap:7px;max-width:520px}
+.bot-keyboard-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.bot-inline-keyboard .bot-keyboard-btn{background:linear-gradient(135deg,rgba(34,158,217,.12),rgba(106,86,255,.14));border:1px solid rgba(34,158,217,.28);color:var(--accent,#229ed9);box-shadow:0 5px 16px rgba(34,158,217,.08)}
+.bot-reply-keyboard{padding:8px;background:rgba(255,255,255,.72);border:1px solid var(--line);border-radius:16px}
+.dark .bot-reply-keyboard{background:rgba(20,28,38,.72)}
+.bot-keyboard-btn{min-height:38px;border-radius:12px;padding:8px 12px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font-weight:700;cursor:pointer;transition:.18s;white-space:normal}
+.bot-keyboard-btn:hover{transform:translateY(-1px);box-shadow:0 7px 18px rgba(0,0,0,.08)}
+.bot-keyboard-btn:disabled{opacity:.55;transform:none}
+.bot-builder{display:grid;gap:12px}
+.bot-builder-head{padding:14px 16px;border-radius:16px;background:linear-gradient(135deg,rgba(34,158,217,.12),rgba(106,86,255,.12));border:1px solid var(--line);display:grid;gap:4px}
+.bot-builder-head small{opacity:.72;line-height:1.8}
+.bot-builder-toolbar,.bot-builder-add{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+.bot-builder-add{grid-template-columns:1.1fr .9fr 1.2fr .55fr auto}
+.bot-builder-add input,.bot-builder-add select,.bot-builder-toolbar select{min-width:0}
+.bb-check{display:flex;align-items:center;gap:7px;font-size:12px;white-space:nowrap}
+.bot-builder-preview{display:grid;gap:7px;padding:12px;border:1px dashed var(--line);border-radius:14px;min-height:48px}
+.bot-builder-button{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}
+.bot-builder-button small{display:block;opacity:.65;margin-top:2px}
+.bot-command-actions{display:flex;gap:6px;flex-wrap:wrap}
+.bot-mini-keyboard{margin-top:8px;display:grid;gap:5px;max-width:300px}
+.bot-mini-keyboard .bot-builder-button{padding:6px 8px;font-size:11px}
+@media(max-width:700px){.bot-builder-add{grid-template-columns:1fr 1fr}.bot-builder-add #bbValue{grid-column:1/-1}.bot-builder-add #bbAdd{grid-column:1/-1}.bot-builder-toolbar{grid-template-columns:1fr}.bot-keyboard-row{grid-template-columns:1fr 1fr}}
+.bot-api-example{margin:10px 18px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}
+.bot-api-example pre{white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.8;margin:8px 0 0;direction:ltr;text-align:left}
+.bot-api-example{margin:10px 18px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}
+.bot-api-example pre{white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.8;margin:8px 0 0;direction:ltr;text-align:left}
