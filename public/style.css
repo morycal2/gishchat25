@@ -277,6 +277,7 @@ body.dark .support-panel textarea,body.dark .support-panel input,body.dark .supp
 .bot-manager-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}
 .bot-manager-actions button,.s4-actions button{border:1px solid var(--border,#dfe7f1);background:var(--surface,#fff);border-radius:12px;padding:8px 10px;cursor:pointer}
 .bot-settings-hero{display:flex;align-items:center;gap:14px;padding:14px;border-radius:18px;background:linear-gradient(135deg,rgba(59,130,246,.10),rgba(124,58,237,.10));margin-bottom:14px}
+.bot-chat-item{align-items:center}.bot-chat-actions{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end;align-items:center}.bot-chat-actions .bb-check{white-space:nowrap}.bot-chat-item .s4-badge{margin-top:6px;display:inline-block}@media(max-width:700px){.bot-chat-actions{justify-content:stretch}.bot-chat-actions>*{flex:1 1 auto}}
 .bot-settings-hero b{display:block;font-size:18px}.bot-settings-hero small{display:block;opacity:.7;margin-top:4px}
 .s4-api-doc{display:grid;gap:9px;margin:14px 0}.s4-api-doc>div{display:grid;grid-template-columns:48px 1fr;gap:4px 9px;align-items:center;padding:11px;border:1px solid var(--border,#e3e8f0);border-radius:14px;background:rgba(127,127,127,.04)}
 .s4-api-doc b{grid-row:1/3;font-size:12px;opacity:.75}.s4-api-doc code{direction:ltr;text-align:left;overflow:auto;white-space:nowrap;font-size:12px}.s4-api-doc small{opacity:.7}

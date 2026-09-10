@@ -336,11 +336,14 @@ async function dispatchBotUpdateForMessage(message) {
     const cid = Number(message.conversation_id);
     const senderId = Number(message.sender_id);
     if (!cid || !senderId) return;
-    const r = await q(`SELECT b.*
+    const r = await q(`SELECT b.*,COALESCE(bcs.can_read,true) AS chat_can_read
       FROM bots b
       JOIN conversation_members cm ON cm.user_id=b.bot_user_id
+      LEFT JOIN bot_chat_settings bcs ON bcs.bot_id=b.id AND bcs.conversation_id=$1
       WHERE cm.conversation_id=$1 AND b.bot_user_id IS NOT NULL AND b.bot_user_id<>$2`, [cid, senderId]);
     if (!r.rowCount) return;
+    const chat=await getConversation(cid); const eligibleBots=r.rows.filter(bot=>bot.chat_can_read!==false && (bot.privacy_mode===false || !['group','channel'].includes(String(chat?.type)) || String(message.text||'').startsWith('/') || String(message.text||'').toLowerCase().includes('@'+String(bot.username||'').toLowerCase())));
+    if (!eligibleBots.length) return;
 
     const update = {
       update_id: Number(message.id),
@@ -359,7 +362,7 @@ async function dispatchBotUpdateForMessage(message) {
       }
     };
 
-    await Promise.allSettled(r.rows.map(async bot => {
+    await Promise.allSettled(eligibleBots.map(async bot => {
       await q('INSERT INTO bot_updates(bot_id,update_json) VALUES($1,$2)', [Number(bot.id), JSON.stringify(update)]);
       const webhook = String(bot.webhook_url || '').trim();
       if (webhook && /^https:\/\//i.test(webhook)) {
@@ -944,6 +947,71 @@ app.delete('/api/bots/:id', auth, async (req,res)=>{
   await q('DELETE FROM bots WHERE id=$1 AND owner_id=$2',[Number(req.params.id),req.user.id]);res.json({ok:true});
 });
 
+// Bot-to-group/channel management: the bot owner can explicitly add the bot to
+// any group/channel where the owner has management rights, then control the bot's
+// posting/reading/admin permissions independently from the owner's account.
+app.get('/api/bots/:id/chats', auth, async (req,res)=>{
+  try{
+    const bot=await getBotForOwner(req.params.id,req.user.id);
+    if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});
+    if(!bot.bot_user_id) bot.bot_user_id=await ensureBotUser(bot);
+    const r=await q(`SELECT c.id,c.name,c.type,c.username,c.description,c.owner_id,
+      EXISTS(SELECT 1 FROM conversation_members bm WHERE bm.conversation_id=c.id AND bm.user_id=$2) AS bot_member,
+      COALESCE(bcs.can_post,true) AS can_post,COALESCE(bcs.can_read,true) AS can_read,COALESCE(bcs.can_manage,false) AS can_manage
+      FROM conversations c
+      JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$1
+      LEFT JOIN bot_chat_settings bcs ON bcs.conversation_id=c.id AND bcs.bot_id=$3
+      WHERE c.type IN ('group','channel')
+        AND (c.owner_id=$1 OR EXISTS(SELECT 1 FROM conversation_admins ca WHERE ca.conversation_id=c.id AND ca.user_id=$1 AND COALESCE((ca.permissions->>'invite')::boolean,true)))
+      ORDER BY c.updated_at DESC,c.id DESC`,[req.user.id,Number(bot.bot_user_id),Number(bot.id)]);
+    res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null,bot_member:!!x.bot_member,can_post:!!x.can_post,can_read:!!x.can_read,can_manage:!!x.can_manage})));
+  }catch(e){console.error('bot chats',e);res.status(500).json({error:'دریافت گفتگوهای ربات ناموفق بود'})}
+});
+
+app.post('/api/bots/:id/chats/:cid', auth, async (req,res)=>{
+  try{
+    const bot=await getBotForOwner(req.params.id,req.user.id);
+    const cid=Number(req.params.cid);
+    const c=await getConversation(cid);
+    if(!bot||!c||!['group','channel'].includes(c.type))return res.status(404).json({error:'ربات یا گفتگو پیدا نشد'});
+    const manager=await conversationManager(cid,req.user.id);
+    if(!manager.ok || (manager.permissions?.invite===false && !manager.owner))return res.status(403).json({error:'اجازه افزودن ربات به این گفتگو را ندارید'});
+    if(!bot.bot_user_id)bot.bot_user_id=await ensureBotUser(bot);
+    if(!bot.can_join_groups && c.type==='group')return res.status(403).json({error:'این ربات اجازه ورود به گروه‌ها را ندارد'});
+    await q("INSERT INTO conversation_members(conversation_id,user_id,role) VALUES($1,$2,'member') ON CONFLICT DO NOTHING",[cid,Number(bot.bot_user_id)]);
+    const canPost=req.body.canPost!==false,canRead=req.body.canRead!==false,canManage=!!req.body.canManage;
+    await q(`INSERT INTO bot_chat_settings(bot_id,conversation_id,can_post,can_read,can_manage) VALUES($1,$2,$3,$4,$5)
+      ON CONFLICT(bot_id,conversation_id) DO UPDATE SET can_post=EXCLUDED.can_post,can_read=EXCLUDED.can_read,can_manage=EXCLUDED.can_manage`,[bot.id,cid,canPost,canRead,canManage]);
+    if(canManage){await q(`INSERT INTO conversation_admins(conversation_id,user_id,role,permissions) VALUES($1,$2,'admin',$3) ON CONFLICT(conversation_id,user_id) DO UPDATE SET role='admin',permissions=EXCLUDED.permissions`,[cid,Number(bot.bot_user_id),JSON.stringify({manage:true,post:true,edit:true,delete:true,invite:true,ban:true})]);await q("UPDATE conversation_members SET role='admin' WHERE conversation_id=$1 AND user_id=$2",[cid,Number(bot.bot_user_id)]);}
+    io.to('conv:'+cid).emit('member_added',{conversationId:cid,userId:Number(bot.bot_user_id),isBot:true});
+    res.json({ok:true,conversationId:cid,bot_user_id:Number(bot.bot_user_id),can_post:canPost,can_read:canRead,can_manage:canManage});
+  }catch(e){console.error('bot add chat',e);res.status(500).json({error:'افزودن ربات ناموفق بود'})}
+});
+
+app.patch('/api/bots/:id/chats/:cid', auth, async (req,res)=>{
+  try{
+    const bot=await getBotForOwner(req.params.id,req.user.id),cid=Number(req.params.cid);
+    const c=await getConversation(cid); if(!bot||!c)return res.status(404).json({error:'پیدا نشد'});
+    const manager=await conversationManager(cid,req.user.id);if(!manager.ok)return res.status(403).json({error:manager.error});
+    const canPost=req.body.canPost!==false,canRead=req.body.canRead!==false,canManage=!!req.body.canManage;
+    await q(`INSERT INTO bot_chat_settings(bot_id,conversation_id,can_post,can_read,can_manage) VALUES($1,$2,$3,$4,$5) ON CONFLICT(bot_id,conversation_id) DO UPDATE SET can_post=EXCLUDED.can_post,can_read=EXCLUDED.can_read,can_manage=EXCLUDED.can_manage`,[bot.id,cid,canPost,canRead,canManage]);
+    if(bot.bot_user_id){if(canManage){await q(`INSERT INTO conversation_admins(conversation_id,user_id,role,permissions) VALUES($1,$2,'admin',$3) ON CONFLICT(conversation_id,user_id) DO UPDATE SET role='admin',permissions=EXCLUDED.permissions`,[cid,Number(bot.bot_user_id),JSON.stringify({manage:true,post:true,edit:true,delete:true,invite:true,ban:true})]);await q("UPDATE conversation_members SET role='admin' WHERE conversation_id=$1 AND user_id=$2",[cid,Number(bot.bot_user_id)]);}else{await q('DELETE FROM conversation_admins WHERE conversation_id=$1 AND user_id=$2',[cid,Number(bot.bot_user_id)]);await q("UPDATE conversation_members SET role='member' WHERE conversation_id=$1 AND user_id=$2",[cid,Number(bot.bot_user_id)]);}}
+    res.json({ok:true,can_post:canPost,can_read:canRead,can_manage:canManage});
+  }catch(e){console.error(e);res.status(500).json({error:'ذخیره دسترسی ربات ناموفق بود'})}
+});
+
+app.delete('/api/bots/:id/chats/:cid', auth, async (req,res)=>{
+  try{
+    const bot=await getBotForOwner(req.params.id,req.user.id),cid=Number(req.params.cid);
+    const c=await getConversation(cid);if(!bot||!c)return res.status(404).json({error:'پیدا نشد'});
+    const manager=await conversationManager(cid,req.user.id);if(!manager.ok)return res.status(403).json({error:manager.error});
+    if(bot.bot_user_id){await q('DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,Number(bot.bot_user_id)]);}
+    await q('DELETE FROM bot_chat_settings WHERE bot_id=$1 AND conversation_id=$2',[bot.id,cid]);
+    io.to('conv:'+cid).emit('member_removed',{conversationId:cid,userId:Number(bot.bot_user_id)});
+    res.json({ok:true});
+  }catch(e){console.error(e);res.status(500).json({error:'خروج ربات از گفتگو ناموفق بود'})}
+});
+
 app.get('/api/bots/:id/commands', auth, async(req,res)=>{try{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});const r=await q('SELECT * FROM bot_commands WHERE bot_id=$1 ORDER BY command',[bot.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),bot_id:Number(x.bot_id)})))}catch(e){res.status(500).json({error:'دریافت دستورات ناموفق بود'})}});
 app.post('/api/bots/:id/commands', auth, async(req,res)=>{try{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});const command=String(req.body.command||'').trim().replace(/^\//,'').slice(0,32),response=String(req.body.response||'').trim().slice(0,4000),replyMarkup=req.body.replyMarkup&&typeof req.body.replyMarkup==='object'?req.body.replyMarkup:null;if(!/^[a-zA-Z0-9_]{1,32}$/.test(command))return res.status(400).json({error:'دستور نامعتبر است'});const r=await q('INSERT INTO bot_commands(bot_id,command,response,reply_markup) VALUES($1,$2,$3,$4) ON CONFLICT(bot_id,command) DO UPDATE SET response=EXCLUDED.response,reply_markup=EXCLUDED.reply_markup RETURNING *',[bot.id,command,response,replyMarkup?JSON.stringify(replyMarkup):null]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){console.error(e);res.status(500).json({error:'ذخیره دستور ناموفق بود'})}});
 app.delete('/api/bots/:id/commands/:command', auth, async(req,res)=>{const bot=await getBotForOwner(req.params.id,req.user.id);if(!bot)return res.status(404).json({error:'ربات پیدا نشد'});await q('DELETE FROM bot_commands WHERE bot_id=$1 AND command=$2',[bot.id,String(req.params.command).replace(/^\//,'')]);res.json({ok:true})});
@@ -957,8 +1025,14 @@ async function botChatMember(bot,chatId){
   const cid=Number(chatId); if(!cid)return false;
   const r=await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,Number(bot.bot_user_id)]); return r.rowCount>0;
 }
+async function botChatSetting(bot,chatId){
+  const r=await q('SELECT can_post,can_read,can_manage FROM bot_chat_settings WHERE bot_id=$1 AND conversation_id=$2',[Number(bot.id),Number(chatId)]);
+  return r.rows[0]||{can_post:true,can_read:true,can_manage:false};
+}
 async function botSendMessage(bot,chatId,text,replyMarkup=null){
   if(!(await botChatMember(bot,chatId)))return {ok:false,error_code:403,description:'Bot is not a member of this chat'};
+  const setting=await botChatSetting(bot,chatId);
+  if(setting.can_post===false)return {ok:false,error_code:403,description:'Bot does not have permission to send messages in this chat'};
   let markup=null;
   if(replyMarkup && typeof replyMarkup==='object'){
     const clean=(rows)=>Array.isArray(rows)?rows.slice(0,8).map(row=>Array.isArray(row)?row.slice(0,4).map(b=>({text:String(b?.text||'').slice(0,80),url:b?.url?String(b.url).slice(0,500):undefined,callback_data:b?.callback_data?String(b.callback_data).slice(0,128):undefined})).filter(x=>x.text):[]).filter(r=>r.length):[];
@@ -1021,6 +1095,26 @@ app.post('/api/bot/:token/answerCallbackQuery', async(req,res)=>{
   const b=await botByToken(req.params.token); if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});
   res.json({ok:true,result:true});
 });
+
+app.get('/api/bot/:token/getChat', async(req,res)=>{
+  const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});
+  const cid=Number(req.query.chat_id??req.query.chatId);const c=await getConversation(cid);if(!c||!(await botChatMember(b,cid)))return res.status(400).json({ok:false,error_code:400,description:'Chat not found or bot is not a member'});
+  const setting=await botChatSetting(b,cid);const members=await q('SELECT count(*)::int AS n FROM conversation_members WHERE conversation_id=$1',[cid]);
+  res.json({ok:true,result:{id:cid,type:c.type,title:c.name,username:c.username||'',description:c.description||'',member_count:Number(members.rows[0]?.n||0),can_post:setting.can_post!==false,can_read:setting.can_read!==false,can_manage:!!setting.can_manage}});
+});
+app.get('/api/bot/:token/getChatMember', async(req,res)=>{
+  const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});
+  const cid=Number(req.query.chat_id??req.query.chatId),uid=Number(req.query.user_id??req.query.userId);if(!(await botChatMember(b,cid)))return res.status(403).json({ok:false,error_code:403,description:'Bot is not a member of this chat'});
+  const r=await q('SELECT cm.role,u.id,u.username,u.display_name,u.avatar,(EXISTS(SELECT 1 FROM bots bx WHERE bx.bot_user_id=u.id)) AS is_bot FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=$1 AND cm.user_id=$2',[cid,uid]);
+  if(!r.rowCount)return res.status(404).json({ok:false,error_code:404,description:'User is not a member of the chat'});const x=r.rows[0];res.json({ok:true,result:{user:{id:Number(x.id),is_bot:!!x.is_bot,first_name:x.display_name||x.username||'',username:x.username||''},status:x.role==='admin'?'administrator':'member'}});
+});
+app.post('/api/bot/:token/leaveChat', async(req,res)=>{
+  const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});const cid=Number(req.body.chat_id??req.body.chatId);if(!cid||!(await botChatMember(b,cid)))return res.status(400).json({ok:false,error_code:400,description:'Bot is not a member of this chat'});
+  await q('DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,Number(b.bot_user_id)]);await q('DELETE FROM bot_chat_settings WHERE bot_id=$1 AND conversation_id=$2',[b.id,cid]);io.to('conv:'+cid).emit('member_removed',{conversationId:cid,userId:Number(b.bot_user_id)});res.json({ok:true,result:true});
+});
+app.get('/api/bot/:token/getMyCommands', async(req,res)=>{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});const r=await q('SELECT command,response FROM bot_commands WHERE bot_id=$1 ORDER BY command',[b.id]);res.json({ok:true,result:r.rows.map(x=>({command:x.command,description:String(x.response||'').split(/\n/)[0].slice(0,256)}))})});
+app.post('/api/bot/:token/setMyCommands', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});const cmds=Array.isArray(req.body.commands)?req.body.commands.slice(0,100):[];for(const c of cmds){const command=String(c?.command||'').replace(/^\//,'').trim();const description=String(c?.description||'').trim().slice(0,256);if(!/^[a-zA-Z0-9_]{1,32}$/.test(command))continue;await q("INSERT INTO bot_commands(bot_id,command,response) VALUES($1,$2,$3) ON CONFLICT(bot_id,command) DO UPDATE SET response=CASE WHEN bot_commands.response='' THEN EXCLUDED.response ELSE bot_commands.response END",[b.id,command,description])}res.json({ok:true,result:true})}catch(e){console.error(e);res.status(500).json({ok:false,error_code:500,description:'Failed to set commands'})}});
+app.post('/api/bot/:token/deleteMyCommands', async(req,res)=>{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});await q('DELETE FROM bot_commands WHERE bot_id=$1',[b.id]);res.json({ok:true,result:true})});
 
 app.post('/api/bot/:token/sendMessage', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.chat_id??req.body.conversationId),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({ok:false,error_code:400,description:'chat_id and text are required'});res.json(await botSendMessage(b,chatId,text,replyMarkup));}catch(e){console.error(e);res.status(500).json({ok:false,error_code:500,description:'Internal server error'})}});
 app.post('/api/bot/:token/send', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({error:'توکن ربات نامعتبر است'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.conversationId??req.body.chat_id),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({error:'conversationId/chat_id و text لازم است'});const result=await botSendMessage(b,chatId,text,replyMarkup);if(!result.ok)return res.status(result.error_code||403).json({error:result.description});res.json(result.result)}catch(e){console.error(e);res.status(500).json({error:'ارسال پیام ربات ناموفق بود'})}});
@@ -1197,7 +1291,7 @@ async function handleBotFatherCommand(cid, uid, rawText){
   let session=sr.rows[0]||{step:'idle',pending_name:'',pending_username:'',pending_bot_id:null};
   const command=text.startsWith('/')?text.split(/\s+/)[0].toLowerCase().replace(/@botfather$/,''):'';
 
-  const help=`🤖 BotFather زنتو\n\nدستورهای اصلی:\n/newbot — ساخت ربات جدید\n/mybots — ربات‌های شما\n/help — راهنما\n/cancel — لغو عملیات فعلی\n/setname — تغییر نام ربات\n/setdescription — تغییر توضیحات ربات\n/setphoto — تغییر عکس پروفایل ربات\n/settings — تنظیمات ربات‌ها\n\nبرای ساخت ربات ابتدا /newbot را بفرستید.`;
+  const help=`🤖 BotFather زنتو\n\nدستورهای اصلی:\n/newbot — ساخت ربات جدید\n/mybots — ربات‌های شما\n/help — راهنما\n/cancel — لغو عملیات فعلی\n/setname — تغییر نام ربات\n/setdescription — تغییر توضیحات ربات\n/setabouttext — متن درباره ربات\n/setphoto — تغییر عکس پروفایل ربات\n/setcommands — مدیریت منوی دستورات\n/token — دریافت توکن API\n/revoke — تعویض توکن API\n/setprivacy — حالت Privacy گروه\n/setinline — فعال/غیرفعال کردن Inline\n/setjoingroups — اجازه ورود به گروه‌ها\n/deletebot — حذف ربات\n/settings — تنظیمات ربات‌ها\n\nربات‌ها را می‌توانی از پنل «ربات‌ها» به گروه و کانال اضافه کنی و دسترسی ارسال/خواندن/مدیریت را جداگانه تنظیم کنی.`;
   if(command==='/help' || command==='/start'){
     await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'idle') ON CONFLICT(user_id) DO UPDATE SET step='idle',pending_name='',pending_username='',pending_bot_id=NULL,updated_at=now()`,[uid]);
     await sendBotFatherReply(cid,help); return true;
@@ -1232,6 +1326,56 @@ async function handleBotFatherCommand(cid, uid, rawText){
     const botUserId=await ensureBotUser(r.rows[0]);
     await q(`UPDATE botfather_sessions SET step='idle',pending_name='',pending_username='',pending_bot_id=$2,updated_at=now() WHERE user_id=$1`,[uid,Number(r.rows[0].id)]);
     await sendBotFatherReply(cid,`🎉 ربات با موفقیت ساخته شد!\n\nنام: ${r.rows[0].name}\nشناسه: @${r.rows[0].username}\n\n🔐 توکن API:\n${r.rows[0].token}\n\nاین توکن را محرمانه نگه دار.\n\nبرای ارسال پیام از API زنتو استفاده کن:\nPOST /api/bot/<TOKEN>/send`); return true;
+  }
+  if(command==='/token' || command==='/revoke'){
+    const tokenStep=command==='/revoke'?'revoke_bot':'token_bot'; await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET step=$2,updated_at=now()`,[uid,tokenStep]);
+    await sendBotFatherReply(cid,command==='/revoke'?'username ربات را بفرست تا توکن جدید برایش بسازم.':'username ربات را بفرست تا توکن API آن را نمایش بدهم.'); return true;
+  }
+  if(['token_bot','revoke_bot'].includes(session.step) && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT * FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);
+    if(!r.rowCount){await sendBotFatherReply(cid,'رباتی با این username در حساب شما پیدا نشد.');return true;}
+    const bot=r.rows[0];
+    if(session.step==='revoke_bot'){const token=makeBotToken();await q('UPDATE bots SET token=$1 WHERE id=$2',[token,bot.id]);await sendBotFatherReply(cid,`🔐 توکن ربات @${bot.username} تعویض شد.\n\n${token}`)}else await sendBotFatherReply(cid,`🔐 توکن API ربات @${bot.username}:\n\n${bot.token}`);
+    await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);return true;
+  }
+  if(command==='/setabouttext'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'setabout_bot') ON CONFLICT(user_id) DO UPDATE SET step='setabout_bot',updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,'username ربات را بفرست، مثلاً @my_zento_bot');return true;
+  }
+  if(session.step==='setabout_bot' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT id FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);
+    if(!r.rowCount){await sendBotFatherReply(cid,'ربات پیدا نشد.');return true;}await q(`UPDATE botfather_sessions SET step='setabout_text',pending_bot_id=$2,updated_at=now() WHERE user_id=$1`,[uid,Number(r.rows[0].id)]);await sendBotFatherReply(cid,'متن About جدید را بفرست.');return true;
+  }
+  if(session.step==='setabout_text' && !text.startsWith('/')){await q('UPDATE bots SET about_text=$1 WHERE id=$2 AND owner_id=$3',[text.slice(0,120),session.pending_bot_id,uid]);await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);await sendBotFatherReply(cid,'متن About با موفقیت تغییر کرد.');return true;}
+  if(command==='/setprivacy' || command==='/setinline' || command==='/setjoingroups'){
+    const step=command==='/setprivacy'?'setprivacy_bot':command==='/setinline'?'setinline_bot':'setjoingroups_bot';
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET step=$2,updated_at=now()`,[uid,step]);await sendBotFatherReply(cid,'username ربات را بفرست، مثلاً @my_zento_bot');return true;
+  }
+  if(['setprivacy_bot','setinline_bot','setjoingroups_bot'].includes(session.step) && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT id FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);if(!r.rowCount){await sendBotFatherReply(cid,'ربات پیدا نشد.');return true;}
+    const labels={setprivacy_bot:['privacy_mode','Privacy'],setinline_bot:['inline_mode','Inline'],setjoingroups_bot:['can_join_groups','ورود به گروه‌ها']}[session.step];await q(`UPDATE botfather_sessions SET step=$2,pending_bot_id=$3,updated_at=now() WHERE user_id=$1`,[uid,session.step.replace('_bot','_value'),Number(r.rows[0].id)]);await sendBotFatherReply(cid,`برای ${labels[1]} بنویس: on یا off`);return true;
+  }
+  if(['setprivacy_value','setinline_value','setjoingroups_value'].includes(session.step) && !text.startsWith('/')){
+    const val=/^(on|true|1|فعال)$/i.test(text);const col=session.step==='setprivacy_value'?'privacy_mode':session.step==='setinline_value'?'inline_mode':'can_join_groups';await q(`UPDATE bots SET ${col}=$1 WHERE id=$2 AND owner_id=$3`,[val,session.pending_bot_id,uid]);await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);await sendBotFatherReply(cid,`تنظیم ${col} روی ${val?'فعال':'غیرفعال'} قرار گرفت.`);return true;
+  }
+  if(command==='/deletebot'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'deletebot_bot') ON CONFLICT(user_id) DO UPDATE SET step='deletebot_bot',updated_at=now()`,[uid]);await sendBotFatherReply(cid,'username رباتی که می‌خواهی حذف شود را بفرست. این کار قابل برگشت نیست.');return true;
+  }
+  if(session.step==='deletebot_bot' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT id,name FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);if(!r.rowCount){await sendBotFatherReply(cid,'ربات پیدا نشد.');return true;}await q('DELETE FROM bots WHERE id=$1 AND owner_id=$2',[r.rows[0].id,uid]);await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);await sendBotFatherReply(cid,`🗑️ ربات @${username} حذف شد.`);return true;
+  }
+  if(command==='/setcommands'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'setcommands_bot') ON CONFLICT(user_id) DO UPDATE SET step='setcommands_bot',updated_at=now()`,[uid]);await sendBotFatherReply(cid,'username ربات را بفرست، مثلاً @my_zento_bot');return true;
+  }
+  if(session.step==='setcommands_bot' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT id FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);if(!r.rowCount){await sendBotFatherReply(cid,'ربات پیدا نشد.');return true;}await q(`UPDATE botfather_sessions SET step='setcommands_text',pending_bot_id=$2,updated_at=now() WHERE user_id=$1`,[uid,Number(r.rows[0].id)]);await sendBotFatherReply(cid,'دستورات را هر خط به شکل زیر بفرست:\nstart - شروع ربات\nhelp - راهنما\n\nبرای پاک کردن همه دستورات /deletecommands را بفرست.');return true;
+  }
+  if(command==='/deletecommands'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'deletecommands_bot') ON CONFLICT(user_id) DO UPDATE SET step='deletecommands_bot',updated_at=now()`,[uid]);await sendBotFatherReply(cid,'username ربات را بفرست.');return true;
+  }
+  if(session.step==='deletecommands_bot' && !text.startsWith('/')){const username=text.replace(/^@/,'').trim().toLowerCase();const r=await q('SELECT id FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);if(!r.rowCount){await sendBotFatherReply(cid,'ربات پیدا نشد.');return true;}await q('DELETE FROM bot_commands WHERE bot_id=$1',[r.rows[0].id]);await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);await sendBotFatherReply(cid,'منوی دستورات ربات پاک شد.');return true;}
+  if(session.step==='setcommands_text' && !text.startsWith('/')){
+    const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).slice(0,100);await q('DELETE FROM bot_commands WHERE bot_id=$1',[session.pending_bot_id]);for(const line of lines){const m=line.match(/^\/?([a-zA-Z0-9_]{1,32})\s*(?:[-—:]\s*)?(.*)$/);if(!m)continue;await q('INSERT INTO bot_commands(bot_id,command,response) VALUES($1,$2,$3) ON CONFLICT(bot_id,command) DO UPDATE SET response=EXCLUDED.response',[session.pending_bot_id,m[1],m[2].slice(0,4000)])}await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);await sendBotFatherReply(cid,`✅ منوی دستورات ربات به‌روزرسانی شد (${lines.length} مورد).`);return true;
   }
   if(command==='/setdescription'){
     await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'setdescription_bot') ON CONFLICT(user_id) DO UPDATE SET step='setdescription_bot',updated_at=now()`,[uid]);
@@ -1323,6 +1467,21 @@ async function ensureStage4Schema(){
     UNIQUE(bot_id,command)
   )`);
   await q(`ALTER TABLE bot_commands ADD COLUMN IF NOT EXISTS reply_markup JSONB`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS about_text TEXT NOT NULL DEFAULT ''`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS privacy_mode BOOLEAN NOT NULL DEFAULT true`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS inline_mode BOOLEAN NOT NULL DEFAULT false`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS can_join_groups BOOLEAN NOT NULL DEFAULT true`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS can_read_all_group_messages BOOLEAN NOT NULL DEFAULT false`);
+  await q(`CREATE TABLE IF NOT EXISTS bot_chat_settings(
+    bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    can_post BOOLEAN NOT NULL DEFAULT true,
+    can_read BOOLEAN NOT NULL DEFAULT true,
+    can_manage BOOLEAN NOT NULL DEFAULT false,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(bot_id,conversation_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS bot_chat_settings_conv_idx ON bot_chat_settings(conversation_id)`);
   await q(`CREATE INDEX IF NOT EXISTS bots_owner_idx ON bots(owner_id)`);
 }
 

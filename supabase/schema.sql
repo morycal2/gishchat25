@@ -171,6 +171,24 @@ CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_id,id DESC);
 CREATE INDEX IF NOT EXISTS messages_file_idx ON messages(conversation_id,kind,id DESC);
 
 -- Zento v7.4 Stage 4
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS bot_user_id BIGINT UNIQUE REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT '';
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS about_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS privacy_mode BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS inline_mode BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS can_join_groups BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS can_read_all_group_messages BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE bot_commands ADD COLUMN IF NOT EXISTS reply_markup JSONB;
+CREATE TABLE IF NOT EXISTS bot_chat_settings (
+ bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+ conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+ can_post BOOLEAN NOT NULL DEFAULT true,
+ can_read BOOLEAN NOT NULL DEFAULT true,
+ can_manage BOOLEAN NOT NULL DEFAULT false,
+ added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(bot_id,conversation_id)
+);
+CREATE INDEX IF NOT EXISTS bot_chat_settings_conv_idx ON bot_chat_settings(conversation_id);
 CREATE INDEX IF NOT EXISTS bots_owner_idx ON bots(owner_id);
 -- Real-time games are ephemeral and stored in server memory; no database table is required.
 -- Multi-device sessions are represented by Socket.IO connections and do not persist device secrets.
