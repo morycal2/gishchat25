@@ -90,7 +90,7 @@ function safeUser(row) {
   if (!row) return null;
   return {
     id: Number(row.id), username: row.username, email: row.email || '',
-    display_name: row.display_name, avatar: row.avatar || '', bio: row.bio || ''
+    display_name: row.display_name, avatar: row.avatar || '', bio: row.bio || '', is_bot: !!row.is_bot
   };
 }
 async function getUser(id) {
@@ -314,6 +314,19 @@ async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType
   await q('UPDATE conversations SET updated_at=now() WHERE id=$1', [cid]);
   return messageView(r.rows[0]);
 }
+
+app.post('/api/conversations/bot', auth, async (req,res)=>{
+  try{
+    const username=String(req.body.username||'').replace(/^@/,'').trim().toLowerCase();
+    if(!username) return res.status(400).json({error:'شناسه ربات لازم است'});
+    const r=await q('SELECT * FROM bots WHERE lower(username)=lower($1) LIMIT 1',[username]);
+    if(!r.rowCount) return res.status(404).json({error:'ربات پیدا نشد'});
+    const bot=r.rows[0]; const botUid=await ensureBotUser(bot);
+    if(Number(botUid)===Number(req.user.id)) return res.status(400).json({error:'نمی‌توانی با ربات خودت گفتگو بسازی'});
+    const c=await ensureDirectConversation(req.user.id,botUid);
+    res.json(await conversationView(c,req.user.id));
+  }catch(e){console.error(e);res.status(500).json({error:'باز کردن گفتگوی ربات ناموفق بود'})}
+});
 
 app.post('/api/messages', auth, async (req, res) => {
   try {
@@ -1049,6 +1062,10 @@ function botToken(){
 async function sendBotFatherReply(cid, text){
   const bf=await getBotFatherUser();
   if(!bf) return null;
+  const member=await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[Number(cid),Number(bf.id)]);
+  if(!member.rowCount){
+    await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[Number(cid),Number(bf.id)]);
+  }
   const out=await insertMessage({cid,uid:Number(bf.id),text,kind:'bot'});
   io.to('conv:'+cid).emit('message',out);
   return out;
