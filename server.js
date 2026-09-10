@@ -306,6 +306,15 @@ app.post('/api/messages', auth, async (req, res) => {
     const expiresIn=req.body.expiresIn?Number(req.body.expiresIn):null;
     const quoteIds=Array.isArray(req.body.quoteIds)?req.body.quoteIds:[];
     if (!text && !fileUrl) return res.status(400).json({ error: 'پیام خالی است' });
+    if (text && !fileUrl && await isBotFatherConversation(cid)) {
+      const userOut=await insertMessage({ cid, uid:req.user.id, text, kind:'text', replyTo, profileId, expiresIn, quoteIds });
+      io.to('conv:'+cid).emit('message',userOut);
+      const handled=await handleBotFatherCommand(cid, req.user.id, text);
+      if(handled){
+        const fresh=await q('SELECT * FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 1',[cid]);
+        return res.json(await messageView(fresh.rows[0]));
+      }
+    }
     const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
     io.to('conv:' + cid).emit('message', out);
     res.json(out);
@@ -616,7 +625,13 @@ io.on('connection', async socket => {
   socket.on('send_message', async d => {
     try { const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok)return;
       const text=String(d.text||'').trim().slice(0,5000), fileUrl=String(d.fileUrl||'').slice(0,1000), fileType=String(d.fileType||'').slice(0,120), fileName=safeFileName(d.fileName||'');
-      if(!text&&!fileUrl)return; const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out);
+      if(!text&&!fileUrl)return;
+      if(text&&!fileUrl&&await isBotFatherConversation(cid)){
+        const userOut=await insertMessage({cid,uid,text,kind:'text',replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]});
+        io.to('conv:'+cid).emit('message',userOut);
+        if(await handleBotFatherCommand(cid,uid,text)) return;
+      }
+      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out);
     } catch(e){ console.error('socket send_message',e); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
@@ -657,6 +672,12 @@ io.on('connection', async socket => {
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
+  // Lightweight mesh conference signaling for small groups/channels. Media stays peer-to-peer; server only relays SDP/ICE.
+  socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
+  socket.on('conference:offer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
+  socket.on('conference:answer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:answer',{room,from:uid,answer:d.answer}); });
+  socket.on('conference:ice', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:ice',{room,from:uid,candidate:d.candidate}); });
+  socket.on('conference:leave', d => { const room=String(d.room||''); socket.leave(room); socket.to(room).emit('conference:peer-left',{room,userId:uid}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
@@ -879,6 +900,150 @@ async function ensureStage3Schema(){
   await q(`CREATE INDEX IF NOT EXISTS messages_file_idx ON messages(conversation_id,kind,id DESC)`);
 }
 
+async function ensureBotFather(){
+  // System account used by the built-in @BotFather assistant.
+  const existing=await q("SELECT id,username,display_name,avatar,bio FROM users WHERE lower(username)=lower('BotFather') LIMIT 1");
+  if(existing.rowCount) return Number(existing.rows[0].id);
+  const passwordHash=await bcrypt.hash(crypto.randomBytes(32).toString('hex'),10);
+  const r=await q(`INSERT INTO users(username,email,password_hash,display_name,bio)
+    VALUES('BotFather','botfather@zento.local',$1,'BotFather','مدیریت و ساخت ربات‌های زنتو')
+    ON CONFLICT(username) DO UPDATE SET display_name='BotFather',bio='مدیریت و ساخت ربات‌های زنتو'
+    RETURNING id`,[passwordHash]);
+  return Number(r.rows[0].id);
+}
+
+async function ensureBotFatherSchema(){
+  await q(`CREATE TABLE IF NOT EXISTS botfather_sessions(
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    step TEXT NOT NULL DEFAULT 'idle',
+    pending_name TEXT NOT NULL DEFAULT '',
+    pending_username TEXT NOT NULL DEFAULT '',
+    pending_bot_id BIGINT REFERENCES bots(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS botfather_sessions_updated_idx ON botfather_sessions(updated_at)`);
+}
+
+async function getBotFatherUser(){
+  const r=await q("SELECT id,username,email,display_name,avatar,bio FROM users WHERE lower(username)=lower('BotFather') LIMIT 1");
+  return r.rows[0]||null;
+}
+
+async function ensureDirectConversation(userA,userB){
+  const existing=await q(`SELECT c.* FROM conversations c
+    JOIN conversation_members a ON a.conversation_id=c.id AND a.user_id=$1
+    JOIN conversation_members b ON b.conversation_id=c.id AND b.user_id=$2
+    WHERE c.type='direct' AND (SELECT count(*) FROM conversation_members x WHERE x.conversation_id=c.id)=2 LIMIT 1`,[userA,userB]);
+  if(existing.rowCount) return existing.rows[0];
+  const cr=await q(`INSERT INTO conversations(name,type) VALUES('گفتگو','direct') RETURNING *`);
+  const c=cr.rows[0];
+  await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2),($1,$3)',[c.id,userA,userB]);
+  return c;
+}
+
+function botToken(){
+  return `${crypto.randomInt(100000000,999999999)}:${crypto.randomBytes(24).toString('base64url')}`;
+}
+
+async function sendBotFatherReply(cid, text){
+  const bf=await getBotFatherUser();
+  if(!bf) return null;
+  const out=await insertMessage({cid,uid:Number(bf.id),text,kind:'bot'});
+  io.to('conv:'+cid).emit('message',out);
+  return out;
+}
+
+async function isBotFatherConversation(cid){
+  const bf=await getBotFatherUser();
+  if(!bf) return false;
+  const r=await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,Number(bf.id)]);
+  return r.rowCount>0;
+}
+
+async function handleBotFatherCommand(cid, uid, rawText){
+  const bf=await getBotFatherUser();
+  if(!bf || Number(uid)===Number(bf.id)) return false;
+  const member=await q(`SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2 AND EXISTS(
+    SELECT 1 FROM conversation_members x WHERE x.conversation_id=$1 AND x.user_id=$3)`,[cid,uid,Number(bf.id)]);
+  if(!member.rowCount) return false;
+  const text=String(rawText||'').trim();
+  const sr=await q('SELECT * FROM botfather_sessions WHERE user_id=$1',[uid]);
+  let session=sr.rows[0]||{step:'idle',pending_name:'',pending_username:'',pending_bot_id:null};
+  const command=text.startsWith('/')?text.split(/\s+/)[0].toLowerCase().replace(/@botfather$/,''):'';
+
+  const help=`🤖 BotFather زنتو\n\nدستورهای اصلی:\n/newbot — ساخت ربات جدید\n/mybots — ربات‌های شما\n/help — راهنما\n/cancel — لغو عملیات فعلی\n/setname — تغییر نام ربات\n/setdescription — تغییر توضیحات ربات\n\nبرای ساخت ربات ابتدا /newbot را بفرستید.`;
+  if(command==='/help' || command==='/start'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'idle') ON CONFLICT(user_id) DO UPDATE SET step='idle',pending_name='',pending_username='',pending_bot_id=NULL,updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,help); return true;
+  }
+  if(command==='/cancel'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'idle') ON CONFLICT(user_id) DO UPDATE SET step='idle',pending_name='',pending_username='',pending_bot_id=NULL,updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,'لغو شد. هر وقت خواستی برای ساخت ربات /newbot را بفرست.'); return true;
+  }
+  if(command==='/mybots'){
+    const r=await q('SELECT name,username,description,created_at FROM bots WHERE owner_id=$1 ORDER BY id DESC',[uid]);
+    if(!r.rowCount){await sendBotFatherReply(cid,'هنوز رباتی نداری. برای ساخت اولین ربات /newbot را بفرست.');return true;}
+    const list=r.rows.map((b,i)=>`${i+1}. 🤖 ${b.name}\n   @${b.username}\n   ${b.description||'بدون توضیحات'}`).join('\n\n');
+    await sendBotFatherReply(cid,`🤖 ربات‌های شما:\n\n${list}\n\nبرای ساخت ربات جدید /newbot را بفرست.`); return true;
+  }
+  if(command==='/newbot'){
+    await q(`INSERT INTO botfather_sessions(user_id,step,pending_name,pending_username,pending_bot_id) VALUES($1,'name','','',NULL)
+      ON CONFLICT(user_id) DO UPDATE SET step='name',pending_name='',pending_username='',pending_bot_id=NULL,updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,'عالیه! اول یک نام برای ربات بفرست.\n\nمثال: My Zento Bot'); return true;
+  }
+  if(session.step==='name' && !text.startsWith('/')){
+    const name=text.slice(0,64);
+    if(name.length<2){await sendBotFatherReply(cid,'نام ربات خیلی کوتاه است. دوباره یک نام بفرست.');return true;}
+    await q(`UPDATE botfather_sessions SET step='username',pending_name=$2,updated_at=now() WHERE user_id=$1`,[uid,name]);
+    await sendBotFatherReply(cid,'حالا یک username بفرست که به @ ختم می‌شود و باید به bot ختم شود.\n\nمثال: MyZentoBot یا my_zento_bot'); return true;
+  }
+  if(session.step==='username' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();
+    if(!/^[a-z0-9_]{5,32}bot$/.test(username)){await sendBotFatherReply(cid,'username نامعتبر است. فقط حروف انگلیسی، عدد و _ مجاز است و باید با bot تمام شود.');return true;}
+    const dupe=await q('SELECT 1 FROM bots WHERE lower(username)=lower($1)',[username]);
+    if(dupe.rowCount){await sendBotFatherReply(cid,'این username قبلاً استفاده شده است. یک username دیگر انتخاب کن.');return true;}
+    const r=await q(`INSERT INTO bots(owner_id,username,name,description,webhook_url,token) VALUES($1,$2,$3,'','',$4) RETURNING id,name,username,token`,[uid,username,session.pending_name,botToken()]);
+    await q(`UPDATE botfather_sessions SET step='idle',pending_name='',pending_username='',pending_bot_id=$2,updated_at=now() WHERE user_id=$1`,[uid,Number(r.rows[0].id)]);
+    await sendBotFatherReply(cid,`🎉 ربات با موفقیت ساخته شد!\n\nنام: ${r.rows[0].name}\nشناسه: @${r.rows[0].username}\n\n🔐 توکن API:\n${r.rows[0].token}\n\nاین توکن را محرمانه نگه دار.\n\nبرای ارسال پیام از API زنتو استفاده کن:\nPOST /api/bot/<TOKEN>/send`); return true;
+  }
+  if(command==='/setdescription'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'setdescription_bot') ON CONFLICT(user_id) DO UPDATE SET step='setdescription_bot',updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,'username ربات را بفرست، مثلاً @my_zento_bot'); return true;
+  }
+  if(session.step==='setdescription_bot' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();
+    const r=await q('SELECT id,name FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);
+    if(!r.rowCount){await sendBotFatherReply(cid,'رباتی با این username در حساب شما پیدا نشد.');return true;}
+    await q(`UPDATE botfather_sessions SET step=$2,pending_bot_id=$3,updated_at=now() WHERE user_id=$1`,[uid,'setdescription_text',Number(r.rows[0].id)]);
+    await sendBotFatherReply(cid,'حالا توضیحات جدید ربات را بفرست.'); return true;
+  }
+  if(session.step==='setdescription_text' && !text.startsWith('/')){
+    await q('UPDATE bots SET description=$1 WHERE id=$2 AND owner_id=$3',[text.slice(0,300),session.pending_bot_id,uid]);
+    await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);
+    await sendBotFatherReply(cid,'توضیحات ربات با موفقیت تغییر کرد.'); return true;
+  }
+  if(command==='/setname'){
+    await q(`INSERT INTO botfather_sessions(user_id,step) VALUES($1,'setname_bot') ON CONFLICT(user_id) DO UPDATE SET step='setname_bot',updated_at=now()`,[uid]);
+    await sendBotFatherReply(cid,'username ربات را بفرست، مثلاً @my_zento_bot'); return true;
+  }
+  if(session.step==='setname_bot' && !text.startsWith('/')){
+    const username=text.replace(/^@/,'').trim().toLowerCase();
+    const r=await q('SELECT id FROM bots WHERE owner_id=$1 AND lower(username)=lower($2)',[uid,username]);
+    if(!r.rowCount){await sendBotFatherReply(cid,'رباتی با این username در حساب شما پیدا نشد.');return true;}
+    await q(`UPDATE botfather_sessions SET step='setname_text',pending_bot_id=$2,updated_at=now() WHERE user_id=$1`,[uid,Number(r.rows[0].id)]);
+    await sendBotFatherReply(cid,'نام جدید ربات را بفرست.'); return true;
+  }
+  if(session.step==='setname_text' && !text.startsWith('/')){
+    await q('UPDATE bots SET name=$1 WHERE id=$2 AND owner_id=$3',[text.slice(0,60),session.pending_bot_id,uid]);
+    await q(`UPDATE botfather_sessions SET step='idle',pending_bot_id=NULL,updated_at=now() WHERE user_id=$1`,[uid]);
+    await sendBotFatherReply(cid,'نام ربات با موفقیت تغییر کرد.'); return true;
+  }
+  if(text && !text.startsWith('/')){
+    await sendBotFatherReply(cid,'دستور را متوجه نشدم. برای دیدن دستورهای قابل استفاده /help را بفرست.'); return true;
+  }
+  await sendBotFatherReply(cid,'دستور نامعتبر است. /help را بفرست تا فهرست دستورها را ببینی.'); return true;
+}
+
 async function ensureStage4Schema(){
   await q(`CREATE TABLE IF NOT EXISTS bots (
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -936,6 +1101,8 @@ async function start(){
   await ensureStage1Schema();
   await ensureStage3Schema();
   await ensureStage4Schema();
+  await ensureBotFatherSchema();
+  await ensureBotFather();
   await ensureStage5Schema();
   await ensureStorageBucket();
   server.listen(PORT,()=>console.log(`Zento PostgreSQL backend listening on port ${PORT}`));
