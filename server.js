@@ -111,7 +111,7 @@ async function getConversation(cid) {
 }
 let currentViewUserId=0;
 async function conversationView(c, viewerId=currentViewUserId) {
-  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio
+  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio, (EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) AS is_bot
     FROM conversation_members cm JOIN users u ON u.id=cm.user_id
     WHERE cm.conversation_id=$1 ORDER BY cm.user_id`, [c.id]);
   const last = await q(`SELECT id,text,kind,created_at FROM messages WHERE conversation_id=$1 AND deleted=false AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2) ORDER BY id DESC LIMIT 1`, [c.id, viewerId]);
@@ -307,10 +307,10 @@ async function canMessage(cid, uid) {
   return { ok: true, conversation: c };
 }
 
-async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType='', fileName='', replyTo=null, profileId=null, expiresIn=null, quoteIds=[], botId=null }) {
+async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType='', fileName='', replyTo=null, profileId=null, expiresIn=null, quoteIds=[], botId=null, replyMarkup=null }) {
   const expiresAt = expiresIn ? new Date(Date.now()+Number(expiresIn)*1000) : null;
-  const r = await q(`INSERT INTO messages(conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,profile_id,expires_at,quote_ids,bot_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [cid, uid, text, fileUrl, fileType, fileName, kind, replyTo, profileId, expiresAt, JSON.stringify(Array.isArray(quoteIds)?quoteIds.map(Number).filter(Boolean):[]), botId]);
+  const r = await q(`INSERT INTO messages(conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,profile_id,expires_at,quote_ids,bot_id,reply_markup)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [cid, uid, text, fileUrl, fileType, fileName, kind, replyTo, profileId, expiresAt, JSON.stringify(Array.isArray(quoteIds)?quoteIds.map(Number).filter(Boolean):[]), botId, replyMarkup ? JSON.stringify(replyMarkup) : null]);
   await q('UPDATE conversations SET updated_at=now() WHERE id=$1', [cid]);
   return messageView(r.rows[0]);
 }
@@ -890,14 +890,19 @@ async function botChatMember(bot,chatId){
   const cid=Number(chatId); if(!cid)return false;
   const r=await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[cid,Number(bot.bot_user_id)]); return r.rowCount>0;
 }
-async function botSendMessage(bot,chatId,text){
+async function botSendMessage(bot,chatId,text,replyMarkup=null){
   if(!(await botChatMember(bot,chatId)))return {ok:false,error_code:403,description:'Bot is not a member of this chat'};
-  const out=await insertMessage({cid:Number(chatId),uid:Number(bot.bot_user_id),text:String(text||'').slice(0,5000),kind:'bot',botId:Number(bot.id)});
+  let markup=null;
+  if(replyMarkup && typeof replyMarkup==='object'){
+    const kb=Array.isArray(replyMarkup.inline_keyboard)?replyMarkup.inline_keyboard:null;
+    if(kb) markup={inline_keyboard:kb.slice(0,8).map(row=>Array.isArray(row)?row.slice(0,4).map(b=>({text:String(b.text||'').slice(0,80),url:b.url?String(b.url).slice(0,500):undefined,callback_data:b.callback_data?String(b.callback_data).slice(0,128):undefined})):[]).filter(r=>r.length)};
+  }
+  const out=await insertMessage({cid:Number(chatId),uid:Number(bot.bot_user_id),text:String(text||'').slice(0,5000),kind:'bot',botId:Number(bot.id),replyMarkup:markup});
   io.to('conv:'+Number(chatId)).emit('message',out);
-  return {ok:true,result:{message_id:Number(out.id),chat:{id:Number(chatId)},from:{id:Number(bot.id),is_bot:true,first_name:bot.name,username:bot.username},text:out.text||''}};
+  return {ok:true,result:{message_id:Number(out.id),chat:{id:Number(chatId)},from:{id:Number(bot.id),is_bot:true,first_name:bot.name,username:bot.username},text:out.text||'',reply_markup:markup}};
 }
-app.post('/api/bot/:token/sendMessage', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.chat_id??req.body.conversationId),text=String(req.body.text||'').trim();if(!chatId||!text)return res.status(400).json({ok:false,error_code:400,description:'chat_id and text are required'});res.json(await botSendMessage(b,chatId,text));}catch(e){console.error(e);res.status(500).json({ok:false,error_code:500,description:'Internal server error'})}});
-app.post('/api/bot/:token/send', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({error:'توکن ربات نامعتبر است'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.conversationId??req.body.chat_id),text=String(req.body.text||'').trim();if(!chatId||!text)return res.status(400).json({error:'conversationId/chat_id و text لازم است'});const result=await botSendMessage(b,chatId,text);if(!result.ok)return res.status(result.error_code||403).json({error:result.description});res.json(result.result)}catch(e){console.error(e);res.status(500).json({error:'ارسال پیام ربات ناموفق بود'})}});
+app.post('/api/bot/:token/sendMessage', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.chat_id??req.body.conversationId),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({ok:false,error_code:400,description:'chat_id and text are required'});res.json(await botSendMessage(b,chatId,text,replyMarkup));}catch(e){console.error(e);res.status(500).json({ok:false,error_code:500,description:'Internal server error'})}});
+app.post('/api/bot/:token/send', async(req,res)=>{try{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({error:'توکن ربات نامعتبر است'});if(!b.bot_user_id)b.bot_user_id=await ensureBotUser(b);const chatId=Number(req.body.conversationId??req.body.chat_id),text=String(req.body.text||'').trim(),replyMarkup=req.body.reply_markup||req.body.replyMarkup||null;if(!chatId||!text)return res.status(400).json({error:'conversationId/chat_id و text لازم است'});const result=await botSendMessage(b,chatId,text,replyMarkup);if(!result.ok)return res.status(result.error_code||403).json({error:result.description});res.json(result.result)}catch(e){console.error(e);res.status(500).json({error:'ارسال پیام ربات ناموفق بود'})}});
 
 app.post('/api/bot/:token/setWebhook', async(req,res)=>{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});const url=String(req.body.url||'').trim();if(url&&!/^https:\/\//i.test(url))return res.status(400).json({ok:false,error_code:400,description:'Webhook URL must use HTTPS'});await q('UPDATE bots SET webhook_url=$1 WHERE id=$2',[url,b.id]);res.json({ok:true,result:true})});
 app.get('/api/bot/:token/getWebhookInfo', async(req,res)=>{const b=await botByToken(req.params.token);if(!b)return res.status(401).json({ok:false,error_code:401,description:'Unauthorized'});res.json({ok:true,result:{url:b.webhook_url||'',pending_update_count:0}})});
@@ -1184,6 +1189,7 @@ async function ensureStage4Schema(){
   )`);
   await q(`CREATE INDEX IF NOT EXISTS bot_updates_pending_idx ON bot_updates(bot_id,consumed,id)`);
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS bot_id BIGINT REFERENCES bots(id) ON DELETE SET NULL`);
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_markup JSONB`);
   await q(`CREATE TABLE IF NOT EXISTS bot_commands (
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
