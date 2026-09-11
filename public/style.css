@@ -331,3 +331,32 @@ body.dark .bot-created-button{background:#182230;color:#fff;border-color:#2b3a4d
 /* Zento v4.21 — command switch, faster chat UX, labeled controls and notification/call polish */
 .composer-tool{width:auto;min-width:44px;padding:0 10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:16px}.composer-tool span,.bot-command-toggle span{font-size:10px;font-weight:700}.bot-command-toggle{width:auto;min-width:58px;padding:0 9px;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--accent);background:#eaf5ff}.bot-commands-panel{position:absolute;right:4%;left:4%;bottom:82px;z-index:12;padding:10px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.96);backdrop-filter:blur(22px);box-shadow:0 20px 60px rgba(20,45,65,.20);max-height:220px;overflow:auto}.dark .bot-commands-panel{background:rgba(23,33,43,.97)}.bot-commands-panel .bot-keyboard{margin-top:0;max-width:none}.bot-commands-empty{padding:14px;text-align:center;color:var(--muted);font-size:11px}.labeled-head{width:auto;min-width:44px;padding:0 9px;display:flex;align-items:center;justify-content:center;gap:5px}.labeled-head span{font-size:9px;font-weight:700}.call-avatar img{width:100%;height:100%;object-fit:cover;border-radius:inherit}.call-actions button{width:auto!important;min-width:58px!important;height:48px!important;padding:0 11px!important;border-radius:15px!important;display:flex!important;align-items:center;justify-content:center;gap:5px!important}.call-actions button span{font-size:9px;font-weight:700}.call-actions .accept-call,.call-actions .reject-call{min-width:90px!important}.call-actions #endCall{min-width:90px!important}.call-top #callTimer{font-variant-numeric:tabular-nums;font-weight:800}.bubble-row{will-change:transform,opacity}.send:active,.bot-keyboard-btn:active,.call-actions button:active{transform:scale(.96)}
 @media(max-width:850px){.composer-tool span,.bot-command-toggle span{display:none}.composer-tool,.bot-command-toggle{width:40px;min-width:40px;padding:0}.labeled-head span{display:none}.labeled-head{width:40px;padding:0}.bot-commands-panel{right:2%;left:2%;bottom:78px}.call-actions button{min-width:44px!important;padding:0 8px!important}.call-actions button span{display:none}}
+
+/* Zento v4.22 — readable controls, bot keyboard rail and call settings */
+.control-emoji{font-size:17px;line-height:1;flex:0 0 auto}.control-label{font-size:10px;font-weight:800;line-height:1.2;white-space:nowrap}
+#settingsNav button{display:flex;align-items:center;justify-content:center;gap:7px;min-height:42px}
+#settingsNav button .control-label{font-size:11px}
+.bot-commands-panel{border:1px solid rgba(51,144,236,.22);background:rgba(255,255,255,.98);padding:12px}
+.bot-commands-panel:before{content:'🧩 دکمه‌های ربات';display:block;font-weight:900;font-size:11px;color:var(--text);padding:2px 4px 9px;border-bottom:1px solid var(--line);margin-bottom:9px}
+.bot-commands-panel .bot-keyboard-row{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.bot-commands-panel .bot-keyboard-btn{min-height:42px;font-size:11px}
+.bot-created-buttons .primary{width:100%}
+.bot-builder-preview .bot-keyboard{margin-top:0}
+.call-end-button{background:#d93648!important;color:#fff!important}
+.call-end-button .control-label{font-size:10px}
+body.dark .control-label,body.dark #settingsNav button .control-label{color:#fff}
+body.dark #settingsNav button{color:#fff;background:#1b2834;border-color:#2d3d4b}
+body.dark #settingsNav button.active{background:#24394a;color:#fff}
+body.dark .bot-commands-panel{color:#fff;background:rgba(23,33,43,.99);border-color:#33495a}
+body.dark .bot-commands-panel:before{color:#fff}
+body.dark .bot-commands-panel .bot-keyboard-btn{color:#fff;background:#202d38;border-color:#344756}
+@media(max-width:850px){
+  .settings-layout nav button{min-width:135px;padding:9px 12px}
+  .settings-layout nav button .control-label{display:inline!important;font-size:10px}
+  .head-actions .labeled-head{width:auto;min-width:72px;padding:0 7px}
+  .head-actions .labeled-head .control-label{display:inline!important}
+  .composer-tool,.bot-command-toggle{width:auto;min-width:70px;padding:0 8px}
+  .composer-tool .control-label,.bot-command-toggle .control-label{display:inline!important}
+  .call-actions button{min-width:74px!important;padding:0 9px!important}
+  .call-actions button .control-label{display:inline!important}
+}
