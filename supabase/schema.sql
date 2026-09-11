@@ -192,3 +192,14 @@ CREATE INDEX IF NOT EXISTS bot_chat_settings_conv_idx ON bot_chat_settings(conve
 CREATE INDEX IF NOT EXISTS bots_owner_idx ON bots(owner_id);
 -- Real-time games are ephemeral and stored in server memory; no database table is required.
 -- Multi-device sessions are represented by Socket.IO connections and do not persist device secrets.
+
+-- v4.21 notifications / push subscriptions
+create table if not exists push_subscriptions (
+  id bigserial primary key,
+  user_id bigint not null references users(id) on delete cascade,
+  endpoint text not null unique,
+  subscription jsonb not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists push_subscriptions_user_idx on push_subscriptions(user_id);

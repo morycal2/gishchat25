@@ -384,6 +384,22 @@ async function dispatchBotUpdateForMessage(message) {
   }
 }
 
+async function pushToUser(targetUserId,payload){
+    if(!process.env.VAPID_PUBLIC_KEY||!process.env.VAPID_PRIVATE_KEY||!process.env.VAPID_SUBJECT)return;
+    try{
+      const webpush=require('web-push');webpush.setVapidDetails(process.env.VAPID_SUBJECT,process.env.VAPID_PUBLIC_KEY,process.env.VAPID_PRIVATE_KEY);
+      const r=await q('SELECT endpoint,subscription FROM push_subscriptions WHERE user_id=$1',[Number(targetUserId)]);
+      await Promise.all(r.rows.map(async row=>{try{await webpush.sendNotification(row.subscription,JSON.stringify(payload))}catch(e){if(e.statusCode===404||e.statusCode===410)await q('DELETE FROM push_subscriptions WHERE endpoint=$1',[row.endpoint]);else console.warn('push delivery',e.message)}}));
+    }catch(e){console.warn('web push unavailable',e.message)}
+  }
+async function pushMessageNotification(message){
+    try{const r=await q(`SELECT cm.user_id,ps.endpoint,ps.subscription,COALESCE(up.settings,'{}'::jsonb) settings
+      FROM conversation_members cm JOIN push_subscriptions ps ON ps.user_id=cm.user_id
+      LEFT JOIN user_preferences up ON up.user_id=cm.user_id
+      WHERE cm.conversation_id=$1 AND cm.user_id<>$2`,[Number(message.conversation_id),Number(message.sender_id)]);
+      for(const x of r.rows){if(x.settings?.notifications?.messages===false)continue;await pushToUser(x.user_id,{title:message.bot_name||message.display_name||'زنتو',body:x.settings?.notifications?.previews===false?'پیام جدید':String(message.text||'رسانه جدید').slice(0,140),icon:message.avatar||'/zento-icon.png',url:`/#/msg/${message.conversation_id}/${message.id}`,tag:`zento-msg-${message.id}`})}
+    }catch(e){console.warn('message push',e.message)}
+  }
 app.post('/api/messages', auth, async (req, res) => {
   try {
     const cid = Number(req.body.conversationId); const check = await canMessage(cid, req.user.id);
@@ -401,11 +417,12 @@ app.post('/api/messages', auth, async (req, res) => {
       const handled=await handleBotFatherCommand(cid, req.user.id, text);
       if(handled){
         const fresh=await q('SELECT * FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 1',[cid]);
-        return res.json(await messageView(fresh.rows[0]));
+        void pushMessageNotification(fresh.rows[0]); return res.json(await messageView(fresh.rows[0]));
       }
     }
     const out = await insertMessage({ cid, uid: req.user.id, text, kind, fileUrl, fileType, fileName, replyTo, profileId, expiresIn, quoteIds });
     io.to('conv:' + cid).emit('message', out);
+    void pushMessageNotification(out);
     if(text && !fileUrl) void handleConfiguredBotCommand(cid, req.user.id, text);
     void dispatchBotUpdateForMessage(out);
     res.json(out);
@@ -521,16 +538,18 @@ app.delete('/api/profile/songs/:id', auth, async(req,res)=>{await q("DELETE FROM
 // ---- Zento Stage 1: appearance, folders, chat locks, profiles ----
 const defaultTheme={accent:'#3390ec',mine:'#2b6cff',theirs:'#ffffff',background:'#dce9f4',bubbleRadius:18,shadow:true,fontSize:15,compact:false};
 const defaultSettings={
-  notifications:{messages:true,sounds:true,previews:true},
+  notifications:{messages:true,sounds:true,previews:true,sound:'default'},
   data_usage:{autoplay:true,autoDownloadImages:true,autoDownloadVideos:false,autoDownloadAudio:false},
   privacy:{lastSeen:'everyone',profilePhoto:'everyone',readReceipts:true},
   security:{twoStep:false},
-  appearance:{dark:false,compact:false}
+  appearance:{dark:false,compact:false},
+  calls:{ringtone:'classic',ringVolume:0.8,conferenceTone:true}
 };
 function mergeSettings(value){return {
   ...defaultSettings,
   ...(value||{}),
   notifications:{...defaultSettings.notifications,...((value||{}).notifications||{})},
+  calls:{...defaultSettings.calls,...((value||{}).calls||{})},
   data_usage:{...defaultSettings.data_usage,...((value||{}).data_usage||{})},
   privacy:{...defaultSettings.privacy,...((value||{}).privacy||{})},
   security:{...defaultSettings.security,...((value||{}).security||{})},
@@ -759,7 +778,7 @@ io.on('connection', async socket => {
       socket.emit('message_hidden',Number(m.id));
     }
   }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}); } catch(e){ console.error('call offer',e); } });
+  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
@@ -1041,7 +1060,7 @@ async function botSendMessage(bot,chatId,text,replyMarkup=null){
     else if(replyMarkup.remove_keyboard) markup={remove_keyboard:true};
   }
   const out=await insertMessage({cid:Number(chatId),uid:Number(bot.bot_user_id),text:String(text||'').slice(0,5000),kind:'bot',botId:Number(bot.id),replyMarkup:markup});
-  io.to('conv:'+Number(chatId)).emit('message',out);
+  io.to('conv:'+Number(chatId)).emit('message',out); void pushMessageNotification(out);
   return {ok:true,result:{message_id:Number(out.id),chat:{id:Number(chatId)},from:{id:Number(bot.id),is_bot:true,first_name:bot.name,username:bot.username},text:out.text||'',reply_markup:markup}};
 }
 
@@ -1061,7 +1080,7 @@ async function handleConfiguredBotCommand(cid, uid, rawText){
   if(!cr.rowCount) return false;
   const bot=cr.rows[0];
   const out=await insertMessage({cid,uid:Number(bot.bot_user_id),text:String(bot.response||'').slice(0,5000),kind:'bot',botId:Number(bot.id),replyMarkup:bot.reply_markup||null});
-  io.to('conv:'+cid).emit('message',out);
+  io.to('conv:'+cid).emit('message',out); void pushMessageNotification(out);
   return true;
 }
 
