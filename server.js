@@ -759,7 +759,7 @@ io.on('connection', async socket => {
       socket.emit('message_hidden',Number(m.id));
     }
   }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', d => io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}));
+  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}); } catch(e){ console.error('call offer',e); } });
   socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
   socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));

@@ -314,3 +314,16 @@ body.dark .support-panel textarea,body.dark .support-panel input,body.dark .supp
 .bot-api-example pre{white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.8;margin:8px 0 0;direction:ltr;text-align:left}
 .bot-api-example{margin:10px 18px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}
 .bot-api-example pre{white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.8;margin:8px 0 0;direction:ltr;text-align:left}
+/* Zento v4.20 bot command links + button showcase + private conference */
+.bot-command-link{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;margin:0 2px;border-radius:8px;border:1px solid rgba(51,144,236,.28);background:rgba(51,144,236,.10);color:var(--accent);font-weight:800;cursor:pointer;text-decoration:none}
+.bot-command-link:hover{background:rgba(51,144,236,.18);transform:translateY(-1px)}
+.bot-created-buttons{display:grid;gap:8px;margin-top:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(135deg,rgba(51,144,236,.07),rgba(123,97,255,.08))}
+.bot-created-head{display:grid;gap:3px;margin-bottom:3px}.bot-created-head small,.bot-created-button small{color:var(--muted);font-size:10px}
+.bot-created-button{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border-radius:13px;border:1px solid var(--line);background:var(--panel);color:var(--text);text-align:right}
+.bot-created-button span{font-weight:800}.bot-created-button:hover{border-color:var(--accent);box-shadow:0 7px 18px rgba(51,144,236,.10)}
+.bot-created-empty{padding:10px;border-radius:12px;background:var(--panel2);color:var(--muted);font-size:11px;text-align:center}
+.bot-manager-feature-line{margin-top:6px;color:var(--accent);font-size:9px;font-weight:700}
+.conference-select{cursor:pointer}.conference-select input{margin-inline-start:auto;width:19px;height:19px;accent-color:var(--accent)}
+.call-actions button#screenShareCall,.call-actions button#conferenceCall{font-size:21px}
+body.dark .bot-created-button{background:#182230;color:#fff;border-color:#2b3a4d}body.dark .bot-created-buttons{background:linear-gradient(135deg,rgba(51,144,236,.10),rgba(123,97,255,.10))}
+@media(max-width:650px){.bot-created-button{padding:10px}.bot-created-button small{font-size:9px}}
