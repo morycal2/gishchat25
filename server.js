@@ -208,10 +208,35 @@ app.get('/api/bots/resolve/:username', auth, async (req,res)=>{
 
 app.get('/api/conversations', auth, async (req, res) => {
   currentViewUserId=req.user.id;
-  const r = await q(`SELECT c.* FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id
-    WHERE cm.user_id=$1 AND c.name <> '__zento_saved__' ORDER BY c.updated_at DESC, c.id DESC`, [req.user.id]);
-  const views = []; for (const c of r.rows) views.push(await conversationView(c, req.user.id));
-  res.json(views);
+  // Bulk-load the conversation list in one query. The previous implementation
+  // performed several queries per conversation, which became very slow as chats grew.
+  const r = await q(`
+    SELECT c.id,c.name,c.type,c.created_at,c.owner_id,c.description,c.username,c.photo,c.updated_at,
+      COALESCE(members.members,'[]'::json) AS members,
+      COALESCE(lastm.last_text,'') AS last_text,
+      COALESCE(lastm.last_time,c.created_at) AS last_time,
+      COALESCE(unread.unread_count,0)::int AS unread_count,
+      COALESCE(cus.pinned,false) AS pinned, COALESCE(cus.muted,false) AS muted, COALESCE(cus.archived,false) AS archived
+    FROM conversations c
+    JOIN conversation_members mecm ON mecm.conversation_id=c.id AND mecm.user_id=$1
+    LEFT JOIN LATERAL (
+      SELECT json_agg(json_build_object('id',u.id,'username',u.username,'display_name',u.display_name,'avatar',u.avatar,'bio',u.bio,'is_bot',EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) ORDER BY u.id) AS members
+      FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=c.id
+    ) members ON true
+    LEFT JOIN LATERAL (
+      SELECT CASE WHEN m.kind='voice' THEN '🎙️ پیام صوتی' WHEN m.kind='image' THEN '🖼️ تصویر' WHEN m.kind='video' THEN '🎬 ویدیو' WHEN m.kind='audio' THEN '🎵 آهنگ' ELSE COALESCE(NULLIF(m.text,''),'📎 فایل') END AS last_text,m.created_at AS last_time
+      FROM messages m WHERE m.conversation_id=c.id AND m.deleted=false
+        AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$1)
+      ORDER BY m.id DESC LIMIT 1
+    ) lastm ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS unread_count FROM messages m JOIN conversation_members cm2 ON cm2.conversation_id=m.conversation_id AND cm2.user_id=$1
+      WHERE m.conversation_id=c.id AND m.sender_id<>$1 AND m.deleted=false AND m.created_at>cm2.last_read_at
+        AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$1)
+    ) unread ON true
+    LEFT JOIN conversation_user_settings cus ON cus.conversation_id=c.id AND cus.user_id=$1
+    WHERE c.name <> '__zento_saved__' ORDER BY c.updated_at DESC,c.id DESC`, [req.user.id]);
+  res.json(r.rows.map(c=>({id:Number(c.id),name:c.name,type:c.type||'group',created_at:c.created_at,last_text:c.last_text||'',last_time:c.last_time,members:(c.members||[]).map(u=>({...u,id:Number(u.id)})),owner_id:c.owner_id?Number(c.owner_id):null,description:c.description||'',username:c.username||'',photo:c.photo||'',unread_count:Number(c.unread_count||0),_pinned:!!c.pinned,_muted:!!c.muted,_archived:!!c.archived})));
 });
 
 app.post('/api/conversations/direct', auth, async (req, res) => {
@@ -278,10 +303,19 @@ app.post('/api/conversations/:id/join', auth, async (req, res) => {
 app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   const cid = Number(req.params.id);
   if (!await isMember(cid, req.user.id)) return res.status(403).json({ error: 'ابتدا باید عضو این گفتگو باشید' });
-  const r = await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids
-    FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 300`, [cid]);
-  const rows = r.rows.reverse(); const out = []; for (const m of rows) out.push(await messageView(m));
-  res.json(out);
+  const r = await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids,profile_id,bot_id
+    FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 150`, [cid]);
+  const rows = r.rows.reverse();
+  const userIds=[...new Set(rows.map(x=>Number(x.sender_id)).filter(Boolean))];
+  const profileIds=[...new Set(rows.map(x=>Number(x.profile_id)).filter(Boolean))];
+  const botIds=[...new Set(rows.map(x=>Number(x.bot_id)).filter(Boolean))];
+  const [ur,pr,br]=await Promise.all([
+    userIds.length?q('SELECT id,username,display_name,avatar,bio FROM users WHERE id=ANY($1::bigint[])',[userIds]):Promise.resolve({rows:[]}),
+    profileIds.length?q('SELECT id,name,username,avatar FROM user_profiles WHERE id=ANY($1::bigint[])',[profileIds]):Promise.resolve({rows:[]}),
+    botIds.length?q('SELECT id,name,username FROM bots WHERE id=ANY($1::bigint[])',[botIds]):Promise.resolve({rows:[]})
+  ]);
+  const users=new Map(ur.rows.map(x=>[Number(x.id),x])), profiles=new Map(pr.rows.map(x=>[Number(x.id),x])), bots=new Map(br.rows.map(x=>[Number(x.id),x]));
+  res.json(rows.map(row=>{const u=users.get(Number(row.sender_id))||{};const p=profiles.get(Number(row.profile_id));const b=bots.get(Number(row.bot_id));return {...row,id:Number(row.id),conversation_id:Number(row.conversation_id),sender_id:Number(row.sender_id),profile_id:row.profile_id?Number(row.profile_id):null,bot_id:row.bot_id?Number(row.bot_id):null,reply_to:row.reply_to?Number(row.reply_to):null,reactions:row.reactions||{},display_name:p?.name||u.display_name,username:p?.username||u.username,avatar:p?.avatar||u.avatar,bot_name:b?.name||null,bot_username:b?.username||null};}));
 });
 
 async function canMessage(cid, uid) {
@@ -778,10 +812,10 @@ io.on('connection', async socket => {
       socket.emit('message_hidden',Number(m.id));
     }
   }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
-  socket.on('call:answer', d => io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer}));
-  socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate}));
-  socket.on('call:end', d => io.to('user:'+Number(d.to)).emit('call:end',{from:uid}));
+  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; const cr=await q(`INSERT INTO calls(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(cr.rows[0].id); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
+  socket.on('call:answer', async d => { try { if(d.callId) await q(`UPDATE calls SET status='answered',answered_at=now() WHERE id=$1`,[Number(d.callId)]); io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer,callId:d.callId}); } catch(e){console.error('call answer',e)} });
+  socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate,callId:d.callId}));
+  socket.on('call:end', async d => { try { const dur=Math.max(0,Number(d.duration||0)); const status=d.reason||((dur>0)?'completed':'ended'); if(d.callId){await q(`UPDATE calls SET status=$2,duration=$3,ended_at=now() WHERE id=$1`,[Number(d.callId),status,dur]);}else{await q(`UPDATE calls SET status=$3,duration=$4,ended_at=now() WHERE id=(SELECT id FROM calls WHERE ((caller_id=$1 AND receiver_id=$2) OR (caller_id=$2 AND receiver_id=$1)) AND status='ringing' ORDER BY id DESC LIMIT 1)`,[uid,Number(d.to),status,dur]);} io.to('user:'+Number(d.to)).emit('call:end',{from:uid,callId:d.callId,reason:d.reason,duration:dur}); } catch(e){console.error('call end',e)} });
   // Lightweight mesh conference signaling for small groups/channels. Media stays peer-to-peer; server only relays SDP/ICE.
   socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
   socket.on('conference:offer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
@@ -791,6 +825,9 @@ io.on('connection', async socket => {
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
 
+
+// ---- Call history ----
+app.get('/api/calls/history', auth, async (req,res)=>{try{const r=await q(`SELECT c.*,cu.display_name caller_name,cu.username caller_username,cu.avatar caller_avatar,ru.display_name receiver_name,ru.username receiver_username,ru.avatar receiver_avatar FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id WHERE c.caller_id=$1 OR c.receiver_id=$1 ORDER BY c.created_at DESC LIMIT 100`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),caller_id:x.caller_id?Number(x.caller_id):null,receiver_id:x.receiver_id?Number(x.receiver_id):null,duration:Number(x.duration||0),is_outgoing:Number(x.caller_id)===Number(req.user.id)})))}catch(e){console.error(e);res.status(500).json({error:'تاریخچه تماس در دسترس نیست'})}});
 
 // ---- Zento Stage 3: badges, statistics, group/channel management, smart notifications ----
 app.get('/api/stats', auth, async (req,res)=>{
@@ -857,7 +894,7 @@ app.put('/api/conversations/:id/management', auth, async (req,res)=>{
     const manager=await conversationManager(cid,req.user.id);
     if(!manager.ok)return res.status(403).json({error:manager.error});
     const incoming=req.body.settings && typeof req.body.settings==='object'?req.body.settings:{};
-    const allowed={slowMode:!!incoming.slowMode,onlyAdminsPost:!!incoming.onlyAdminsPost,approval:!!incoming.approval,hideMembers:!!incoming.hideMembers,comments:!!incoming.comments};
+    const allowed={slowMode:!!incoming.slowMode,onlyAdminsPost:!!incoming.onlyAdminsPost,approval:!!incoming.approval,hideMembers:!!incoming.hideMembers,comments:!!incoming.comments,media:incoming.media!==false,linkPreview:incoming.linkPreview!==false,joinByLink:incoming.joinByLink!==false,antiSpam:!!incoming.antiSpam};
     await q('UPDATE conversations SET settings=$1,updated_at=now() WHERE id=$2',[JSON.stringify(allowed),cid]);
     res.json({settings:allowed});
   }catch(e){console.error(e);res.status(500).json({error:'ذخیره تنظیمات ناموفق بود'})}
@@ -1524,6 +1561,10 @@ async function ensureStage5Schema(){
   await q(`CREATE TABLE IF NOT EXISTS story_reactions (story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, reaction TEXT NOT NULL DEFAULT '❤️', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(story_id,user_id))`);
   await q(`CREATE INDEX IF NOT EXISTS story_reactions_story_idx ON story_reactions(story_id)`);
   await q(`CREATE TABLE IF NOT EXISTS conversation_user_settings (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, pinned BOOLEAN NOT NULL DEFAULT false, muted BOOLEAN NOT NULL DEFAULT false, archived BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,conversation_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS calls (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, caller_id BIGINT REFERENCES users(id) ON DELETE SET NULL, receiver_id BIGINT REFERENCES users(id) ON DELETE SET NULL, type TEXT NOT NULL DEFAULT 'audio', status TEXT NOT NULL DEFAULT 'ringing', duration INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), answered_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)`);
+  await q(`ALTER TABLE calls ADD COLUMN IF NOT EXISTS answered_at TIMESTAMPTZ`);
+  await q(`ALTER TABLE calls ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ`);
+  await q(`CREATE INDEX IF NOT EXISTS calls_users_created_idx ON calls(caller_id,receiver_id,created_at DESC)`);
 
 }
 
