@@ -376,3 +376,22 @@ body.dark .bot-commands-panel .bot-keyboard-btn{color:#fff;background:#202d38;bo
 /* Zento v4.24 — call history, advanced archive, profile and performance polish */
 .archive-hero{padding:13px;border-radius:16px;background:linear-gradient(135deg,rgba(51,144,236,.11),rgba(123,97,255,.10));border:1px solid var(--line);display:grid;gap:4px;margin-bottom:10px}.archive-hero b{font-size:13px}.archive-hero small{font-size:9px;color:var(--muted);line-height:1.8}.archive-search{width:100%;margin-bottom:9px;background:var(--panel2);color:var(--text)}.archived-item{position:relative}.archive-more{margin-right:auto;color:var(--muted);font-weight:900;letter-spacing:2px}.call-history-list{display:grid;gap:7px;max-height:62vh;overflow:auto}.call-history-item{display:flex;align-items:center;gap:10px;padding:11px;border:1px solid var(--line);border-radius:15px;background:var(--panel2);color:var(--text)}.call-history-item .chi-main{min-width:0;flex:1}.call-history-item b,.call-history-item small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.call-history-item small{color:var(--muted);font-size:9px;margin-top:3px}.chi-meta{text-align:left;direction:ltr;display:grid;gap:3px;font-size:9px;color:var(--muted)}.chi-status{font-weight:800}.chi-status.out{color:#3390ec}.chi-status.in{color:#35b86b}.chi-status.missed{color:#e95b64}.call-person{position:absolute;top:82px;right:50%;transform:translateX(50%);z-index:3;display:grid;justify-items:center;gap:7px;text-shadow:0 2px 12px #000}.call-person-name{font-size:14px;font-weight:800}.call-person-avatar{width:84px;height:84px;border-radius:28px;overflow:hidden;display:grid;place-items:center;background:linear-gradient(135deg,#3390ec,#7658f5);font-size:30px;box-shadow:0 15px 40px rgba(0,0,0,.32)}.call-person-avatar img{width:100%;height:100%;object-fit:cover}.call-connected .call-person{opacity:.0;pointer-events:none;transition:.2s}.performance-fast .chat-item,.performance-fast .bubble{will-change:transform}.messages{contain:layout paint;content-visibility:auto}.chats{contain:layout paint;content-visibility:auto}
 @media(max-width:850px){.call-person{top:75px}.call-person-avatar{width:72px;height:72px}.call-person-name{font-size:12px}}
+
+/* Zento v4.25 — call scrolling + participant zoom */
+.call-scrollable{max-height:90vh;overflow-y:auto;overflow-x:hidden;scroll-behavior:smooth;overscroll-behavior:contain}
+.remote-wrap,.local-video-wrap{position:relative}
+.remote-wrap.zoomed{min-height:60vh;overflow:auto}
+.remote-wrap.zoomed .call-remote-video{min-height:70vh;max-height:none;object-fit:contain}
+.local-video-wrap.zoomed{width:min(92vw,760px);max-height:70vh;overflow:auto}
+.local-video-wrap.zoomed .local-video{width:100%;max-height:none;object-fit:contain}
+.call-zoom-button,.conference-zoom-button{position:absolute;z-index:8;border:1px solid rgba(255,255,255,.35);background:rgba(8,16,25,.72);color:#fff;border-radius:14px;width:50px;height:50px;font-size:23px;display:grid;place-items:center;cursor:pointer;box-shadow:0 10px 28px rgba(0,0,0,.28);backdrop-filter:blur(10px)}
+.call-zoom-button{right:14px;bottom:14px}.local-video-wrap .call-zoom-button{right:10px;bottom:10px}
+.conference-grid{max-height:74vh;overflow:auto;align-items:start}
+.conference-tile-wrap{position:relative;min-width:0;aspect-ratio:16/10;background:#111c26;border-radius:15px;overflow:hidden;scroll-margin:12px}
+.conference-tile-wrap.zoomed{grid-column:1/-1;aspect-ratio:16/9;min-height:55vh}
+.conference-tile-wrap.zoomed .conference-tile{object-fit:contain;background:#050b11}
+.conference-tile-wrap .conference-tile{width:100%;height:100%;object-fit:cover;display:block}
+.conference-zoom-button{right:10px;bottom:10px;width:48px;height:48px}
+.conference-tile-name{position:absolute;left:10px;bottom:10px;z-index:7;padding:6px 9px;border-radius:10px;background:rgba(0,0,0,.55);color:#fff;font-size:10px;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.call-modal .call-actions{position:sticky;bottom:0;z-index:10;background:rgba(8,18,28,.92);backdrop-filter:blur(14px)}
+@media(max-width:700px){.call-scrollable{max-height:94vh}.conference-tile-wrap.zoomed{min-height:45vh}.call-zoom-button,.conference-zoom-button{width:46px;height:46px}}
