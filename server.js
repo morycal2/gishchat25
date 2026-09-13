@@ -195,20 +195,29 @@ app.post('/api/login', async (req, res) => {
     res.json({ token: tokenFor(u), user: safeUser(u) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ورود ناموفق بود' }); }
 });
+async function adminQuery(sql, params=[], fallbackRows=[]) {
+  try { return await q(sql, params); } catch (e) { console.error('admin query:', e.message); return { rows: fallbackRows, rowCount: fallbackRows.length }; }
+}
 app.get('/api/admin/overview', auth, requireSuperAdmin, async (req,res)=>{
   try{
     const [u,c,m,cl,s]=await Promise.all([
-      q('SELECT count(*)::int n FROM users WHERE COALESCE(is_bot,false)=false'),
-      q('SELECT count(*)::int n FROM conversations'),
-      q('SELECT count(*)::int n FROM messages WHERE deleted=false'),
-      q('SELECT count(*)::int n FROM calls'),
-      q('SELECT count(*)::int n FROM support_requests')
+      adminQuery('SELECT count(*)::int n FROM users WHERE COALESCE(is_bot,false)=false'),
+      adminQuery('SELECT count(*)::int n FROM conversations'),
+      adminQuery('SELECT count(*)::int n FROM messages WHERE deleted=false'),
+      adminQuery('SELECT count(*)::int n FROM calls'),
+      adminQuery('SELECT count(*)::int n FROM support_requests')
     ]);
-    const recent=await q(`SELECT id,display_name,username,email,created_at,is_bot FROM users ORDER BY id DESC LIMIT 20`);
-    const calls=await q(`SELECT c.id,c.status,c.duration,c.created_at,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 12`);
-    const supports=await q(`SELECT sr.id,sr.subject,sr.message,sr.created_at,u.display_name,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id ORDER BY sr.id DESC LIMIT 12`);
-    res.json({stats:{users:u.rows[0].n,conversations:c.rows[0].n,messages:m.rows[0].n,calls:cl.rows[0].n,support:s.rows[0].n},recentUsers:recent.rows.map(x=>({...x,id:Number(x.id)})),recentCalls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)})),support:supports.rows.map(x=>({...x,id:Number(x.id)}))});
+    const recent=await adminQuery(`SELECT id,display_name,username,email,created_at,is_bot FROM users ORDER BY id DESC LIMIT 20`);
+    const calls=await adminQuery(`SELECT c.id,c.status,c.duration,c.created_at,c.type,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 30`);
+    const supports=await adminQuery(`SELECT sr.id,sr.subject,sr.message,sr.created_at,u.display_name,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id ORDER BY sr.id DESC LIMIT 30`);
+    const db=await adminQuery('SELECT NOW() AS server_time');
+    res.json({ok:true,stats:{users:Number(u.rows[0]?.n||0),conversations:Number(c.rows[0]?.n||0),messages:Number(m.rows[0]?.n||0),calls:Number(cl.rows[0]?.n||0),support:Number(s.rows[0]?.n||0)},recentUsers:recent.rows.map(x=>({...x,id:Number(x.id)})),recentCalls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)})),support:supports.rows.map(x=>({...x,id:Number(x.id)})),system:{database:'online',serverTime:db.rows[0]?.server_time||new Date().toISOString(),node:process.version,uptime:Math.floor(process.uptime())}});
   }catch(e){console.error('admin overview',e);res.status(500).json({error:'دریافت اطلاعات مدیریت ناموفق بود'})}
+});
+app.get('/api/admin/health', auth, requireSuperAdmin, async (_req,res)=>{
+  const started=Date.now();
+  try { await q('SELECT 1'); res.json({ok:true,database:'online',latencyMs:Date.now()-started,uptime:Math.floor(process.uptime()),memory:process.memoryUsage()}); }
+  catch(e){res.status(503).json({ok:false,database:'offline',latencyMs:Date.now()-started,error:e.message})}
 });
 app.get('/api/admin/users', auth, requireSuperAdmin, async (req,res)=>{
   const qv=String(req.query.q||'').trim().toLowerCase();
@@ -646,10 +655,10 @@ app.get('/api/conversations/:id/lock', auth, async(req,res)=>{const r=await q('S
 app.post('/api/conversations/:id/lock', auth, async(req,res)=>{const pin=String(req.body.pin||'');if(!/^\d{4,8}$/.test(pin))return res.status(400).json({error:'PIN باید ۴ تا ۸ رقم باشد'});if(!(await isMember(Number(req.params.id),req.user.id)))return res.status(403).json({error:'دسترسی ندارید'});const hash=await bcrypt.hash(pin,12);await q('INSERT INTO chat_locks(user_id,conversation_id,pin_hash) VALUES($1,$2,$3) ON CONFLICT(user_id,conversation_id) DO UPDATE SET pin_hash=EXCLUDED.pin_hash,updated_at=now()',[req.user.id,Number(req.params.id),hash]);res.json({locked:true})});
 app.post('/api/conversations/:id/unlock', auth, async(req,res)=>{const r=await q('SELECT pin_hash FROM chat_locks WHERE user_id=$1 AND conversation_id=$2',[req.user.id,Number(req.params.id)]);if(!r.rowCount)return res.json({unlocked:true});if(!(await bcrypt.compare(String(req.body.pin||''),r.rows[0].pin_hash)))return res.status(403).json({error:'PIN اشتباه است'});res.json({unlocked:true})});
 app.delete('/api/conversations/:id/lock', auth, async(req,res)=>{await q('DELETE FROM chat_locks WHERE user_id=$1 AND conversation_id=$2',[req.user.id,Number(req.params.id)]);res.json({locked:false})});
-app.get('/api/profiles', auth, async(req,res)=>{let r=await q('SELECT * FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC,id',[req.user.id]);if(!r.rowCount){await q('INSERT INTO user_profiles(user_id,name,username,avatar,bio,is_default) VALUES($1,$2,$3,$4,$5,true)',[req.user.id,req.user.display_name,req.user.username,req.user.avatar,req.user.bio]);r=await q('SELECT * FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC,id',[req.user.id]);}res.json(r.rows.map(x=>({...x,id:Number(x.id)})))});
-app.post('/api/profiles', auth, async(req,res)=>{const name=String(req.body.name||'').trim().slice(0,50),username=String(req.body.username||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,30),bio=String(req.body.bio||'').trim().slice(0,200),avatar=String(req.body.avatar||'').slice(0,1000);if(!name||username.length<3)return res.status(400).json({error:'نام و نام کاربری لازم است'});try{const r=await q('INSERT INTO user_profiles(user_id,name,username,avatar,bio) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.user.id,name,username,avatar,bio]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){res.status(409).json({error:'این نام کاربری در پروفایل‌های شما تکراری است'})}});
-app.put('/api/profiles/:id', auth, async(req,res)=>{const id=Number(req.params.id);const r=await q('UPDATE user_profiles SET name=$1,username=$2,bio=$3,avatar=$4 WHERE id=$5 AND user_id=$6 RETURNING *',[String(req.body.name||'').trim().slice(0,50),String(req.body.username||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,30),String(req.body.bio||'').trim().slice(0,200),String(req.body.avatar||'').slice(0,1000),id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'پروفایل پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id)})});
-app.delete('/api/profiles/:id', auth, async(req,res)=>{const id=Number(req.params.id);const r=await q('SELECT is_default FROM user_profiles WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'پروفایل پیدا نشد'});if(r.rows[0].is_default)return res.status(400).json({error:'پروفایل اصلی قابل حذف نیست'});await q('DELETE FROM user_profiles WHERE id=$1 AND user_id=$2',[id,req.user.id]);res.json({ok:true})});
+app.get('/api/profiles', auth, async(req,res)=>{if(req.user?.role==='superadmin') return res.json([]);let r=await q('SELECT * FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC,id',[req.user.id]);if(!r.rowCount){await q('INSERT INTO user_profiles(user_id,name,username,avatar,bio,is_default) VALUES($1,$2,$3,$4,$5,true)',[req.user.id,req.user.display_name,req.user.username,req.user.avatar,req.user.bio]);r=await q('SELECT * FROM user_profiles WHERE user_id=$1 ORDER BY is_default DESC,id',[req.user.id]);}res.json(r.rows.map(x=>({...x,id:Number(x.id)})))});
+app.post('/api/profiles', auth, async(req,res)=>{if(req.user?.role==='superadmin') return res.status(403).json({error:'پنل سازنده از پروفایل‌های کاربری جداست'});const name=String(req.body.name||'').trim().slice(0,50),username=String(req.body.username||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,30),bio=String(req.body.bio||'').trim().slice(0,200),avatar=String(req.body.avatar||'').slice(0,1000);if(!name||username.length<3)return res.status(400).json({error:'نام و نام کاربری لازم است'});try{const r=await q('INSERT INTO user_profiles(user_id,name,username,avatar,bio) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.user.id,name,username,avatar,bio]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){res.status(409).json({error:'این نام کاربری در پروفایل‌های شما تکراری است'})}});
+app.put('/api/profiles/:id', auth, async(req,res)=>{if(req.user?.role==='superadmin') return res.status(403).json({error:'پروفایل سازنده از این بخش قابل ویرایش نیست'});const id=Number(req.params.id);const r=await q('UPDATE user_profiles SET name=$1,username=$2,bio=$3,avatar=$4 WHERE id=$5 AND user_id=$6 RETURNING *',[String(req.body.name||'').trim().slice(0,50),String(req.body.username||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,30),String(req.body.bio||'').trim().slice(0,200),String(req.body.avatar||'').slice(0,1000),id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'پروفایل پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id)})});
+app.delete('/api/profiles/:id', auth, async(req,res)=>{if(req.user?.role==='superadmin') return res.status(403).json({error:'پروفایل سازنده از این بخش قابل حذف نیست'});const id=Number(req.params.id);const r=await q('SELECT is_default FROM user_profiles WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'پروفایل پیدا نشد'});if(r.rows[0].is_default)return res.status(400).json({error:'پروفایل اصلی قابل حذف نیست'});await q('DELETE FROM user_profiles WHERE id=$1 AND user_id=$2',[id,req.user.id]);res.json({ok:true})});
 app.patch('/api/conversations/:id', auth, async (req, res) => {
   try {
     const cid = Number(req.params.id);
