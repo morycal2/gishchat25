@@ -543,7 +543,7 @@ async function renderStoryTopBar(){
   let groups=[];try{groups=await loadStories()}catch{}
   const html=`<button class="story-top-card mine" id="storyTopAdd" type="button"><span class="story-top-add-ring">＋</span><span>استوری من</span></button>`+
     groups.map(g=>`<button class="story-top-card ${g.has_unseen?'unseen':''}" data-story-user="${g.user_id}" type="button">${storyRing(g,'story-top-ring')}<span>${esc(g.user_id===Number(me?.id)?'استوری من':g.display_name)}</span></button>`).join('');
-  [$('storyTopBar'),$('chatStoryTopBar')].filter(Boolean).forEach(b=>{
+  [$('storyTopBar')].filter(Boolean).forEach(b=>{
     b.innerHTML=html;
     b.classList.add('story-bar-ready');
     b.querySelector('#storyTopAdd')?.addEventListener('click',window.openStoryComposer);
