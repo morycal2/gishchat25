@@ -210,6 +210,12 @@ app.post('/api/login', async (req, res) => {
       return res.json({ token: superadminToken(), superadmin: true, user: { id: 0, username: 'superadmin', email: SUPERADMIN_EMAIL, display_name: 'مدیر کل زنتو', avatar: '', bio: '', is_bot: false, role: 'superadmin' } });
     }
     const aa = await q('SELECT sa.user_id,sa.role,sa.permissions,sa.active,u.username,u.email,u.display_name,u.avatar,u.bio,u.password_hash FROM site_admins sa JOIN users u ON u.id=sa.user_id WHERE lower(u.email)=lower($1)',[email]);
+    // The @admin account is a hidden system notification identity. It must never
+    // become a normal/admin session; it only exists as the sender for moderation
+    // notices and broadcasts.
+    if (aa.rowCount && aa.rows[0].active && String(aa.rows[0].username||'').toLowerCase()==='admin') {
+      return res.status(403).json({error:'این حساب فقط برای اطلاع‌رسانی سیستمی است و ورود مستقیم ندارد'});
+    }
     if (aa.rowCount && aa.rows[0].active && aa.rows[0].permissions && Object.keys(aa.rows[0].permissions).length) {
       const u=aa.rows[0];
       if (u.password_hash && await bcrypt.compare(password,u.password_hash)) return res.json({token:jwt.sign({id:Number(u.user_id),adminAccount:true},JWT_SECRET,{expiresIn:'12h'}),admin:true,user:{id:Number(u.user_id),username:u.username,email:u.email,display_name:u.display_name,avatar:u.avatar||'',bio:u.bio||'',is_bot:false,role:'admin'}});
@@ -280,17 +286,27 @@ app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
 app.get('/api/admin/users', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
   try {
     const qv=String(req.query.q||'').trim().toLowerCase();
-    const r=await q(`SELECT id,username,email,display_name,avatar,bio,created_at,ban_until,ban_reason,false AS is_bot FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
+    const r=await q(`SELECT id,username,email,display_name,avatar,bio,created_at,ban_until,ban_reason,false AS is_bot FROM users
+      WHERE NOT EXISTS (SELECT 1 FROM site_admins sa WHERE sa.user_id=users.id AND sa.active=true AND lower(users.username)='admin')
+      AND ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%')
+      ORDER BY id DESC LIMIT 200`,[qv]);
     res.json(r.rows.map(x=>({...x,id:Number(x.id),uid:String(x.uid||String(x.id).padStart(10,'0'))})));
   } catch(e) { console.error('admin users',e); res.status(502).json({error:'دریافت کاربران ناموفق بود؛ ساختار دیتابیس را بررسی کنید'}); }
 });
 app.get('/api/admin/users/search', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
   const qv=String(req.query.q||'').trim().toLowerCase();
-  const r=await q(`SELECT id,username,email,display_name,avatar,created_at,ban_until,ban_reason,false AS is_bot FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
+  const r=await q(`SELECT id,username,email,display_name,avatar,created_at,ban_until,ban_reason,false AS is_bot FROM users
+    WHERE NOT EXISTS (SELECT 1 FROM site_admins sa WHERE sa.user_id=users.id AND sa.active=true AND lower(users.username)='admin')
+    AND ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%')
+    ORDER BY id DESC LIMIT 200`,[qv]);
   res.json(r.rows.map(x=>({...x,id:Number(x.id),uid:String(x.id).padStart(10,'0')})));
 });
 app.get('/api/admin/site-admins', auth, requireSuperAdmin, async (_req,res)=>{
-  const r=await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,sa.created_at,u.username,u.email,u.display_name,u.avatar FROM site_admins sa JOIN users u ON u.id=sa.user_id ORDER BY sa.created_at DESC`);
+  // Hide the dedicated notification identity from the Admins section. It remains
+  // in site_admins internally so moderation notices can be delivered to it.
+  const r=await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,sa.created_at,u.username,u.email,u.display_name,u.avatar
+    FROM site_admins sa JOIN users u ON u.id=sa.user_id
+    WHERE lower(u.username)<>'admin' ORDER BY sa.created_at DESC`);
   res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id),permissions:x.permissions||{}})));
 });
 app.post('/api/admin/site-admins', auth, requireSuperAdmin, async (req,res)=>{
@@ -333,7 +349,11 @@ app.post('/api/admin/users/:id/ban', auth, (req,res,next)=>requireAdminPermissio
   }catch(e){console.error('admin ban',e);res.status(500).json({error:'اعمال محدودیت ناموفق بود'})}
 });
 async function getSystemAdminUser(){
-  const r=await q(`SELECT u.* FROM users u JOIN site_admins sa ON sa.user_id=u.id WHERE sa.active=true ORDER BY (lower(u.username)='admin') DESC, sa.created_at ASC LIMIT 1`);
+  // Dedicated @admin identity: it is NOT a human/admin-panel account.
+  // It stays in the database only as the sender identity for official notices,
+  // broadcasts, and ban/unban/change-ban notifications.
+  const r=await q(`SELECT u.* FROM users u JOIN site_admins sa ON sa.user_id=u.id
+    WHERE sa.active=true AND lower(u.username)='admin' LIMIT 1`);
   return r.rows[0]||null;
 }
 async function getSupportSenderUser(actor){
