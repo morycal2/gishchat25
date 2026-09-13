@@ -17,6 +17,9 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = Number(process.env.PORT || 3000);
 const JWT_SECRET = process.env.JWT_SECRET;
+const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || 'superadmin@zento.com').toLowerCase();
+const SUPERADMIN_PASSWORD_SALT = process.env.SUPERADMIN_PASSWORD_SALT || '545533cf64fb85768f4641adb5cad2ab';
+const SUPERADMIN_PASSWORD_HASH = process.env.SUPERADMIN_PASSWORD_HASH || 'cfb3ab87fe01c3793960b7e373b47e7148f779f7dfee86939517bf0001f85a73c0d3d72b50ad070a6250b965c31451098db16e12d585c99f8c3837ad01cb23b4';
 const DATABASE_URL = process.env.DATABASE_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -139,11 +142,22 @@ async function auth(req, res, next) {
   try {
     const raw = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const d = jwt.verify(raw, JWT_SECRET);
+    if (d.role === 'superadmin') {
+      req.user = { id: 0, username: 'superadmin', email: SUPERADMIN_EMAIL, display_name: 'مدیر کل زنتو', avatar: '', bio: '', is_bot: false, role: 'superadmin' };
+      return next();
+    }
     const u = await getUser(d.id);
     if (!u) throw new Error('user');
     req.user = u; next();
   } catch { res.status(401).json({ error: 'نشست نامعتبر است' }); }
 }
+function isSuperAdminCredentials(email, password) {
+  if (String(email || '').trim().toLowerCase() !== SUPERADMIN_EMAIL) return false;
+  const derived = crypto.scryptSync(String(password || ''), SUPERADMIN_PASSWORD_SALT, 64).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(derived, 'hex'), Buffer.from(SUPERADMIN_PASSWORD_HASH, 'hex'));
+}
+function superadminToken() { return jwt.sign({ id: 0, role: 'superadmin', email: SUPERADMIN_EMAIL }, JWT_SECRET, { expiresIn: '12h' }); }
+function requireSuperAdmin(req,res,next){ if(req.user?.role!=='superadmin') return res.status(403).json({error:'دسترسی پنل مدیریت فقط برای سازنده است'}); next(); }
 
 app.get('/health', async (_req, res) => {
   try { await q('SELECT 1'); res.json({ ok: true, service: 'zento-chat', database: 'postgres', storage: STORAGE_BUCKET, time: new Date().toISOString() }); }
@@ -172,10 +186,38 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    if (isSuperAdminCredentials(email, password)) {
+      return res.json({ token: superadminToken(), superadmin: true, user: { id: 0, username: 'superadmin', email: SUPERADMIN_EMAIL, display_name: 'مدیر کل زنتو', avatar: '', bio: '', is_bot: false, role: 'superadmin' } });
+    }
     const u = await getUserRawByEmail(email);
-    if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.password_hash))) return res.status(401).json({ error: 'ایمیل یا رمز عبور اشتباه است' });
+    if (!u || !(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'ایمیل یا رمز عبور اشتباه است' });
     res.json({ token: tokenFor(u), user: safeUser(u) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ورود ناموفق بود' }); }
+});
+app.get('/api/admin/overview', auth, requireSuperAdmin, async (req,res)=>{
+  try{
+    const [u,c,m,cl,s]=await Promise.all([
+      q('SELECT count(*)::int n FROM users WHERE COALESCE(is_bot,false)=false'),
+      q('SELECT count(*)::int n FROM conversations'),
+      q('SELECT count(*)::int n FROM messages WHERE deleted=false'),
+      q('SELECT count(*)::int n FROM calls'),
+      q('SELECT count(*)::int n FROM support_requests')
+    ]);
+    const recent=await q(`SELECT id,display_name,username,email,created_at,is_bot FROM users ORDER BY id DESC LIMIT 20`);
+    const calls=await q(`SELECT c.id,c.status,c.duration,c.created_at,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 12`);
+    const supports=await q(`SELECT sr.id,sr.subject,sr.message,sr.created_at,u.display_name,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id ORDER BY sr.id DESC LIMIT 12`);
+    res.json({stats:{users:u.rows[0].n,conversations:c.rows[0].n,messages:m.rows[0].n,calls:cl.rows[0].n,support:s.rows[0].n},recentUsers:recent.rows.map(x=>({...x,id:Number(x.id)})),recentCalls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)})),support:supports.rows.map(x=>({...x,id:Number(x.id)}))});
+  }catch(e){console.error('admin overview',e);res.status(500).json({error:'دریافت اطلاعات مدیریت ناموفق بود'})}
+});
+app.get('/api/admin/users', auth, requireSuperAdmin, async (req,res)=>{
+  const qv=String(req.query.q||'').trim().toLowerCase();
+  const r=await q(`SELECT id,username,email,display_name,avatar,bio,is_bot,created_at FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id)})));
+});
+app.get('/api/admin/conversations', auth, requireSuperAdmin, async (req,res)=>{
+  const r=await q(`SELECT c.id,c.name,c.type,c.username,c.created_at,c.owner_id,COUNT(cm.user_id)::int members FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.id DESC LIMIT 200`);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null})));
 });
 app.get('/api/me', auth, (req, res) => res.json(req.user));
 
