@@ -97,7 +97,7 @@ function safeUser(row) {
   };
 }
 async function getUser(id) {
-  const r = await q('SELECT id, username, email, display_name, avatar, bio FROM users WHERE id=$1', [Number(id)]);
+  const r = await q('SELECT id, username, email, display_name, avatar, bio, ban_until, ban_reason FROM users WHERE id=$1', [Number(id)]);
   return safeUser(r.rows[0]);
 }
 async function getUserRawByEmail(email) {
@@ -146,10 +146,16 @@ async function auth(req, res, next) {
       req.user = { id: 0, username: 'superadmin', email: SUPERADMIN_EMAIL, display_name: 'مدیر کل زنتو', avatar: '', bio: '', is_bot: false, role: 'superadmin' };
       return next();
     }
+    if (d.adminAccount) {
+      const ar = await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,u.username,u.email,u.display_name,u.avatar,u.bio
+        FROM site_admins sa JOIN users u ON u.id=sa.user_id WHERE sa.user_id=$1`, [Number(d.id)]);
+      if (!ar.rowCount || !ar.rows[0].active) throw new Error('admin');
+      req.user = {...ar.rows[0], id:Number(ar.rows[0].user_id), is_bot:false, role:'admin', permissions:ar.rows[0].permissions||{}};
+      return next();
+    }
     const u = await getUser(d.id);
     if (!u) throw new Error('user');
-    if (u.ban_until && new Date(u.ban_until).getTime() > Date.now()) { return res.status(403).json({ error: 'حساب شما تا '+new Date(u.ban_until).toLocaleString('fa-IR')+' محدود شده است', ban_until: u.ban_until }); }
-    req.user = u; next();
+    req.user = {...u, banned: !!(u.ban_until && new Date(u.ban_until).getTime() > Date.now())}; next();
   } catch { res.status(401).json({ error: 'نشست نامعتبر است' }); }
 }
 function isSuperAdminCredentials(email, password) {
@@ -161,6 +167,7 @@ function superadminToken() { return jwt.sign({ id: 0, role: 'superadmin', email:
 function requireSuperAdmin(req,res,next){ if(req.user?.role!=='superadmin') return res.status(403).json({error:'دسترسی پنل مدیریت فقط برای سازنده است'}); next(); }
 async function requireAdminPermission(permission,req,res,next){if(req.user?.role==='superadmin')return next();if(await isSiteAdmin(req.user?.id,permission))return next();return res.status(403).json({error:'این بخش در سطح دسترسی شما نیست'})}
 async function requireAnyAdmin(req,res,next){if(req.user?.role==='superadmin')return next();const ok=await Promise.all(['users','ban','reports','support','audit'].map(x=>isSiteAdmin(req.user?.id,x)));if(ok.some(Boolean))return next();return res.status(403).json({error:'دسترسی پنل مدیریت ندارید'})}
+function requireNotBanned(req,res,next){if(req.user?.banned)return res.status(403).json({error:'حساب شما محدود است',ban_until:req.user.ban_until,ban_reason:req.user.ban_reason});next();}
 
 app.get('/health', async (_req, res) => {
   try { await q('SELECT 1'); res.json({ ok: true, service: 'zento-chat', database: 'postgres', storage: STORAGE_BUCKET, time: new Date().toISOString() }); }
@@ -193,10 +200,14 @@ app.post('/api/login', async (req, res) => {
     if (isSuperAdminCredentials(email, password)) {
       return res.json({ token: superadminToken(), superadmin: true, user: { id: 0, username: 'superadmin', email: SUPERADMIN_EMAIL, display_name: 'مدیر کل زنتو', avatar: '', bio: '', is_bot: false, role: 'superadmin' } });
     }
+    const aa = await q('SELECT sa.user_id,sa.role,sa.permissions,sa.active,u.username,u.email,u.display_name,u.avatar,u.bio,u.password_hash FROM site_admins sa JOIN users u ON u.id=sa.user_id WHERE lower(u.email)=lower($1)',[email]);
+    if (aa.rowCount && aa.rows[0].active && aa.rows[0].permissions && Object.keys(aa.rows[0].permissions).length) {
+      const u=aa.rows[0];
+      if (u.password_hash && await bcrypt.compare(password,u.password_hash)) return res.json({token:jwt.sign({id:Number(u.user_id),adminAccount:true},JWT_SECRET,{expiresIn:'12h'}),admin:true,user:{id:Number(u.user_id),username:u.username,email:u.email,display_name:u.display_name,avatar:u.avatar||'',bio:u.bio||'',is_bot:false,role:'admin'}});
+    }
     const u = await getUserRawByEmail(email);
     if (!u || !(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'ایمیل یا رمز عبور اشتباه است' });
-    if (u.ban_until && new Date(u.ban_until).getTime() > Date.now()) return res.status(403).json({ error: 'حساب شما تا '+new Date(u.ban_until).toLocaleString('fa-IR')+' محدود شده است', ban_until:u.ban_until });
-    res.json({ token: tokenFor(u), user: safeUser(u) });
+    res.json({ token: tokenFor(u), user: {...safeUser(u), ban_until:u.ban_until||null, ban_reason:u.ban_reason||null} });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ورود ناموفق بود' }); }
 });
 async function adminQuery(sql, params=[], fallbackRows=[]) {
@@ -236,29 +247,33 @@ app.get('/api/admin/users/search', auth, (req,res,next)=>requireAdminPermission(
   res.json(r.rows.map(x=>({...x,id:Number(x.id),uid:String(x.id).padStart(10,'0')})));
 });
 app.get('/api/admin/site-admins', auth, requireSuperAdmin, async (_req,res)=>{
-  const r=await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,sa.created_at,u.username,u.email,u.display_name,u.avatar
-    FROM site_admins sa JOIN users u ON u.id=sa.user_id ORDER BY sa.created_at DESC`);
+  const r=await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,sa.created_at,u.username,u.email,u.display_name,u.avatar FROM site_admins sa JOIN users u ON u.id=sa.user_id ORDER BY sa.created_at DESC`);
   res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id),permissions:x.permissions||{}})));
 });
 app.post('/api/admin/site-admins', auth, requireSuperAdmin, async (req,res)=>{
-  const uid=Number(req.body.userId), role=String(req.body.role||'support').slice(0,30), permissions=req.body.permissions||{};
-  const u=await getUser(uid); if(!u) return res.status(404).json({error:'کاربر پیدا نشد'});
-  await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,$2,$3,true,0)
-    ON CONFLICT(user_id) DO UPDATE SET role=$2,permissions=$3,active=true`,[uid,role,JSON.stringify(permissions)]);
-  await logAdmin(0,'add_admin',uid,{role,permissions}); res.json({ok:true});
+  const email=String(req.body.email||'').trim().toLowerCase(), password=String(req.body.password||''), name=String(req.body.name||'ادمین').trim().slice(0,50)||'ادمین';
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<6)return res.status(400).json({error:'ایمیل معتبر و رمز حداقل ۶ کاراکتری لازم است'});
+  if(email===SUPERADMIN_EMAIL)return res.status(400).json({error:'ایمیل سازنده قابل استفاده برای ادمین نیست'});
+  if((await q('SELECT 1 FROM users WHERE lower(email)=lower($1)',[email])).rowCount)return res.status(409).json({error:'این ایمیل قبلاً استفاده شده است'});
+  const base=(String(req.body.username||'admin').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,24)||'admin'); let username=base,i=1; while((await q('SELECT 1 FROM users WHERE username=$1',[username])).rowCount) username=base+(i++);
+  const hash=await bcrypt.hash(password,12);
+  const u=await q(`INSERT INTO users(username,email,password_hash,display_name) VALUES($1,$2,$3,$4) RETURNING id,username,email,display_name,avatar`,[username,email,hash,name]);
+  const permissions=req.body.permissions||{support:true,reports:true,users:false,ban:false,admins:false,audit:false};
+  await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,'admin',$2,true,0)`,[u.rows[0].id,JSON.stringify(permissions)]);
+  await logAdmin(0,'add_admin',u.rows[0].id,{email,permissions}); res.json({ok:true,admin:{...u.rows[0],user_id:Number(u.rows[0].id),permissions}});
 });
-app.patch('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{
-  const uid=Number(req.params.id), permissions=req.body.permissions||{}, role=String(req.body.role||'support').slice(0,30), active=req.body.active!==false;
-  if(uid===0) return res.status(400).json({error:'سازنده قابل تغییر نیست'});
-  await q('UPDATE site_admins SET role=$1,permissions=$2,active=$3 WHERE user_id=$4',[role,JSON.stringify(permissions),active,uid]); await logAdmin(0,'update_admin',uid,{role,permissions,active}); res.json({ok:true});
-});
-app.delete('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id);if(uid===0)return res.status(400).json({error:'سازنده قابل حذف نیست'});await q('DELETE FROM site_admins WHERE user_id=$1',[uid]);await logAdmin(0,'remove_admin',uid,{});res.json({ok:true})});
+app.patch('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id),permissions=req.body.permissions||{},active=req.body.active!==false;if(uid===0)return res.status(400).json({error:'سازنده قابل تغییر نیست'});await q('UPDATE site_admins SET permissions=$1,active=$2 WHERE user_id=$3',[JSON.stringify(permissions),active,uid]);if(req.body.password){const h=await bcrypt.hash(String(req.body.password),12);await q('UPDATE users SET password_hash=$1 WHERE id=$2',[h,uid]);}await logAdmin(0,'update_admin',uid,{permissions,active});res.json({ok:true})});
+app.delete('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id);if(uid===0)return res.status(400).json({error:'سازنده قابل حذف نیست'});await q('DELETE FROM site_admins WHERE user_id=$1',[uid]);await q('DELETE FROM users WHERE id=$1',[uid]);await logAdmin(0,'remove_admin',uid,{});res.json({ok:true})});
 app.post('/api/admin/users/:id/ban', auth, (req,res,next)=>requireAdminPermission('ban',req,res,next), async (req,res)=>{
   const uid=Number(req.params.id), minutes=Math.max(0,Math.min(525600,Number(req.body.minutes||0))), reason=String(req.body.reason||'محدودیت مدیریتی').slice(0,300);
   if(!await getUser(uid))return res.status(404).json({error:'کاربر پیدا نشد'});
   if(minutes===0){await q('UPDATE users SET ban_until=NULL,ban_reason=NULL,updated_at=now() WHERE id=$1',[uid]);await logAdmin(req.user.id,'unban_user',uid,{});return res.json({ok:true,ban_until:null})}
-  const until=new Date(Date.now()+minutes*60000);await q('UPDATE users SET ban_until=$1,ban_reason=$2,updated_at=now() WHERE id=$3',[until,reason,uid]);await logAdmin(req.user.id,'ban_user',uid,{minutes,reason});res.json({ok:true,ban_until:until,ban_reason:reason});
+  const until=new Date(Date.now()+minutes*60000);await q('UPDATE users SET ban_until=$1,ban_reason=$2,updated_at=now() WHERE id=$3',[until,reason,uid]);await logAdmin(req.user.id,'ban_user',uid,{minutes,reason});const total=minutes,days=Math.floor(total/1440),hours=Math.floor(total%1440/60),mins=total%60;void sendAdminNotice(uid,`🚫 حساب شما توسط ادمین زنتو محدود شد.\nدلیل: ${reason}\nمدت: ${days} روز و ${hours} ساعت و ${mins} دقیقه\nپایان دقیق: ${until.toLocaleString('fa-IR')}`);void pushToUser(uid,{title:'ادمین زنتو',body:`حساب شما محدود شد. دلیل: ${reason}. پایان محدودیت: ${until.toLocaleString('fa-IR')}`,icon:'/zento-icon.png',url:'/'});res.json({ok:true,ban_until:until,ban_reason:reason});
 });
+async function getSystemAdminUser(){const r=await q(`SELECT u.* FROM users u JOIN site_admins sa ON sa.user_id=u.id WHERE lower(u.username)='admin' AND sa.active=true ORDER BY sa.created_at ASC LIMIT 1`);return r.rows[0]||null}
+async function sendAdminNotice(uid,text){try{const admin=await getSystemAdminUser();if(!admin)return;const existing=await q(`SELECT c.* FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id AND a.user_id=$1 JOIN conversation_members b ON b.conversation_id=c.id AND b.user_id=$2 WHERE c.type='direct' AND (SELECT count(*) FROM conversation_members x WHERE x.conversation_id=c.id)=2 LIMIT 1`,[Number(admin.id),Number(uid)]);let c=existing.rows[0];if(!c){const cr=await q(`INSERT INTO conversations(name,type) VALUES('ادمین','direct') RETURNING *`);c=cr.rows[0];await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2),($1,$3)',[c.id,Number(admin.id),Number(uid)]);}const out=await insertMessage({cid:Number(c.id),uid:Number(admin.id),text,kind:'text'});io.to('conv:'+Number(c.id)).emit('message',out);void pushToUser(Number(uid),{title:'ادمین زنتو',body:text.slice(0,180),icon:'/zento-icon.png',url:`/#/msg/${c.id}/${out.id}`,tag:`zento-admin-${out.id}`});}catch(e){console.error('admin notice',e.message)}}
+app.post('/api/admin/users/:id/warn', auth, (req,res,next)=>requireAdminPermission('ban',req,res,next), async(req,res)=>{const uid=Number(req.params.id),reason=String(req.body.reason||'هشدار مدیریتی').slice(0,500);if(!(await getUser(uid)))return res.status(404).json({error:'کاربر پیدا نشد'});await q(`CREATE TABLE IF NOT EXISTS user_warnings(id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,admin_user_id bigint,reason text NOT NULL,created_at timestamptz NOT NULL DEFAULT now())`);const r=await q('INSERT INTO user_warnings(user_id,admin_user_id,reason) VALUES($1,$2,$3) RETURNING *',[uid,req.user.id,reason]);await logAdmin(req.user.id,'warn_user',uid,{reason});void sendAdminNotice(uid,`⚠️ هشدار از طرف ادمین زنتو:\n${reason}`);void pushToUser(uid,{title:'ادمین زنتو · هشدار',body:`هشدار: ${reason}`,icon:'/zento-icon.png',url:'/'});res.json({ok:true,id:Number(r.rows[0].id),reason,created_at:r.rows[0].created_at})});
+app.get('/api/admin/users/:id/warnings', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async(req,res)=>{await q(`CREATE TABLE IF NOT EXISTS user_warnings(id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,admin_user_id bigint,reason text NOT NULL,created_at timestamptz NOT NULL DEFAULT now())`);const r=await q('SELECT w.*,u.display_name admin_name FROM user_warnings w LEFT JOIN users u ON u.id=w.admin_user_id WHERE w.user_id=$1 ORDER BY w.created_at DESC',[Number(req.params.id)]);res.json(r.rows.map(x=>({...x,id:Number(x.id)}))) });
 app.get('/api/admin/reports', auth, (req,res,next)=>requireAdminPermission('reports',req,res,next), async (_req,res)=>{
   const r=await q(`SELECT r.id,r.reason,r.created_at,r.reported_id,r.reporter_id,r.message_id,r.status,
     ru.display_name reporter_name,ru.username reporter_username,tu.display_name reported_name,tu.username reported_username,
@@ -272,15 +287,15 @@ app.get('/api/admin/conversations', auth, requireAnyAdmin, async (req,res)=>{
   const r=await q(`SELECT c.id,c.name,c.type,c.username,c.created_at,c.owner_id,COUNT(cm.user_id)::int members FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.id DESC LIMIT 200`);
   res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null})));
 });
-app.get('/api/admin/support/:id', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id);const sr=await q(`SELECT sr.*,u.display_name,u.username,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id WHERE sr.id=$1`,[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});const msgs=await q(`SELECT sm.*,u.display_name,u.username FROM support_messages sm JOIN users u ON u.id=sm.sender_id WHERE sm.support_id=$1 ORDER BY sm.created_at ASC`,[id]);res.json({request:sr.rows[0],messages:msgs.rows.map(x=>({...x,id:Number(x.id)}))})});
-app.post('/api/admin/support/:id/messages', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);if(!text)return res.status(400).json({error:'پیام خالی است'});const sr=await q('SELECT * FROM support_requests WHERE id=$1',[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,true) RETURNING *`,[id,req.user.id,text]);await logAdmin(req.user.id,'support_reply',id,{text:text.slice(0,200)});res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});});
+app.get('/api/admin/support/:id', auth, async(req,res)=>{try{await q(`CREATE TABLE IF NOT EXISTS support_messages(id bigint generated by default as identity primary key,support_id bigint NOT NULL REFERENCES support_requests(id) ON DELETE CASCADE,sender_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,text text NOT NULL,is_admin boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now())`);if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id);const sr=await q(`SELECT sr.*,u.display_name,u.username,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id WHERE sr.id=$1`,[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});const msgs=await q(`SELECT sm.*,u.display_name,u.username FROM support_messages sm JOIN users u ON u.id=sm.sender_id WHERE sm.support_id=$1 ORDER BY sm.created_at ASC`,[id]);res.json({request:sr.rows[0],messages:msgs.rows.map(x=>({...x,id:Number(x.id)}))})}catch(e){console.error('admin support get',e);res.status(500).json({error:'گفتگوی پشتیبانی در دسترس نیست'})}});
+app.post('/api/admin/support/:id/messages', auth, async(req,res)=>{try{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});await q(`CREATE TABLE IF NOT EXISTS support_messages(id bigint generated by default as identity primary key,support_id bigint NOT NULL REFERENCES support_requests(id) ON DELETE CASCADE,sender_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,text text NOT NULL,is_admin boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now())`);const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);if(!text)return res.status(400).json({error:'پیام خالی است'});const sr=await q('SELECT * FROM support_requests WHERE id=$1',[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,true) RETURNING *`,[id,req.user.id,text]);await logAdmin(req.user.id,'support_reply',id,{text:text.slice(0,200)});res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});}catch(e){console.error('admin support message',e);res.status(500).json({error:'ارسال پاسخ پشتیبانی ناموفق بود'})}});
 app.post('/api/admin/support/:id/close', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id);await q(`UPDATE support_requests SET status='closed',closed_at=now(),closed_by=$1 WHERE id=$2`,[req.user.id,id]);await logAdmin(req.user.id,'support_close',id,{});res.json({ok:true})});
 app.get('/api/support', auth, async(req,res)=>{const r=await q(`SELECT id,subject,message,status,created_at,closed_at FROM support_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id)})));});
 app.get('/api/support/:id/thread', auth, async(req,res)=>{const id=Number(req.params.id),sr=await q('SELECT * FROM support_requests WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});const msgs=await q(`SELECT sm.*,u.display_name,u.username FROM support_messages sm JOIN users u ON u.id=sm.sender_id WHERE sm.support_id=$1 ORDER BY sm.created_at ASC`,[id]);res.json({request:sr.rows[0],messages:msgs.rows.map(x=>({...x,id:Number(x.id)}))})});
-app.post('/api/support/:id/messages', auth, async(req,res)=>{const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);const sr=await q('SELECT * FROM support_requests WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,false) RETURNING *`,[id,req.user.id,text]);res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});});
+app.post('/api/support/:id/messages', auth, requireNotBanned, async(req,res)=>{const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);const sr=await q('SELECT * FROM support_requests WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,false) RETURNING *`,[id,req.user.id,text]);res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});});
 app.post('/api/support/:id/close', auth, async(req,res)=>{const id=Number(req.params.id);const r=await q(`UPDATE support_requests SET status='closed',closed_at=now(),closed_by=$1 WHERE id=$2 AND user_id=$3 RETURNING id`,[req.user.id,id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});res.json({ok:true})});
 app.get('/api/admin/me', auth, async(req,res)=>{if(req.user?.role==='superadmin')return res.json({isAdmin:true,superadmin:true,permissions:{all:true}});const r=await q('SELECT role,permissions,active FROM site_admins WHERE user_id=$1',[req.user.id]);if(!r.rowCount||!r.rows[0].active)return res.status(403).json({isAdmin:false});res.json({isAdmin:true,superadmin:false,role:r.rows[0].role,permissions:r.rows[0].permissions||{}})});
-app.get('/api/me', auth, (req, res) => res.json(req.user));
+app.get('/api/me', auth, (req, res) => res.json({...req.user,ban_until:req.user.ban_until||null,ban_reason:req.user.ban_reason||null}));
 
 app.get('/api/users', auth, async (req, res) => {
   const qv = String(req.query.q || '').toLowerCase();
@@ -344,6 +359,7 @@ app.get('/api/conversations', auth, async (req, res) => {
 
 app.post('/api/conversations/direct', auth, async (req, res) => {
   const other = Number(req.body.userId);
+  if ((await q('SELECT 1 FROM site_admins WHERE user_id=$1 AND active=true',[other])).rowCount) return res.status(403).json({error:'این حساب فقط برای اطلاع‌رسانی مدیریتی است'});
   if (!await getUser(other) || other === req.user.id) return res.status(400).json({ error: 'کاربر نامعتبر است' });
   const existing = await q(`SELECT c.* FROM conversations c
     JOIN conversation_members a ON a.conversation_id=c.id AND a.user_id=$1
@@ -436,6 +452,7 @@ async function canMessage(cid, uid) {
     }
   }
   if (c.type === 'direct') {
+    const adminTarget=await q(`SELECT 1 FROM site_admins WHERE user_id=(SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1) AND active=true`,[cid,uid]); if(adminTarget.rowCount) return {ok:false,error:'این حساب فقط برای اطلاع‌رسانی مدیریتی است'};
     const mr = await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1', [cid, uid]);
     const other = mr.rows[0]?.user_id;
     if (other && (await q(`SELECT 1 FROM blocks WHERE (user_id=$1 AND blocked_id=$2) OR (user_id=$2 AND blocked_id=$1)`, [uid, other])).rowCount)
@@ -537,7 +554,7 @@ async function pushMessageNotification(message){
       for(const x of r.rows){if(x.settings?.notifications?.messages===false)continue;await pushToUser(x.user_id,{title:message.bot_name||message.display_name||'زنتو',body:x.settings?.notifications?.previews===false?'پیام جدید':String(message.text||'رسانه جدید').slice(0,140),icon:message.avatar||'/zento-icon.png',url:`/#/msg/${message.conversation_id}/${message.id}`,tag:`zento-msg-${message.id}`})}
     }catch(e){console.warn('message push',e.message)}
   }
-app.post('/api/messages', auth, async (req, res) => {
+app.post('/api/messages', auth, requireNotBanned, async (req, res) => {
   try {
     const cid = Number(req.body.conversationId); const check = await canMessage(cid, req.user.id);
     if (!check.ok) return res.status(403).json({ error: check.error });
@@ -581,7 +598,7 @@ app.get('/api/conversations/:id/search', auth, async (req,res)=>{
 });
 app.post('/api/conversations/:id/read', auth, async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});await q('UPDATE conversation_members SET last_read_at=now() WHERE conversation_id=$1 AND user_id=$2',[cid,req.user.id]);await q(`INSERT INTO message_receipts(message_id,user_id,delivered_at,read_at) SELECT id,$2,now(),now() FROM messages WHERE conversation_id=$1 AND sender_id<>$2 AND deleted=false AND NOT EXISTS(SELECT 1 FROM message_receipts mr WHERE mr.message_id=messages.id AND mr.user_id=$2)`,[cid,req.user.id]);io.to('conv:'+cid).emit('read_receipt',{conversationId:cid,userId:req.user.id});res.json({ok:true})});
 app.get('/api/messages/:id/link',auth,async(req,res)=>{const r=await q('SELECT id,conversation_id FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!r.rowCount||!await isMember(r.rows[0].conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});res.json({url:`${String(req.protocol)}://${req.get('host')}/#/msg/${r.rows[0].conversation_id}/${r.rows[0].id}`})});
-app.post('/api/messages/:id/forward',auth,async(req,res)=>{try{const src=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!src.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});const m=src.rows[0], target=Number(req.body.conversationId);const ck=await canMessage(target,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const out=await insertMessage({cid:target,uid:req.user.id,text:m.text,kind:m.kind,fileUrl:m.file_url,fileType:m.file_type,fileName:m.file_name,profileId:null,quoteIds:[m.id]});io.to('conv:'+target).emit('message',out);res.json(out)}catch(e){console.error(e);res.status(500).json({error:'فوروارد ناموفق بود'})}});
+app.post('/api/messages/:id/forward',auth,requireNotBanned,async(req,res)=>{try{const src=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)]);if(!src.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});const m=src.rows[0], target=Number(req.body.conversationId);const ck=await canMessage(target,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const out=await insertMessage({cid:target,uid:req.user.id,text:m.text,kind:m.kind,fileUrl:m.file_url,fileType:m.file_type,fileName:m.file_name,profileId:null,quoteIds:[m.id]});io.to('conv:'+target).emit('message',out);res.json(out)}catch(e){console.error(e);res.status(500).json({error:'فوروارد ناموفق بود'})}});
 function safeFileName(name) { return path.basename(String(name || 'file')).replace(/[^\w.\- ]+/g, '_').slice(0, 120); }
 async function uploadToStorage(file, folder, userId) {
   const ext = path.extname(file.originalname).toLowerCase();
@@ -842,7 +859,7 @@ app.post('/api/saved/chat/messages', auth, async (req,res)=>{
   }catch(e){console.error('saved chat post',e);res.status(500).json({error:'ذخیره پیام ناموفق بود'})}
 });
 
-app.post('/api/support', auth, async (req,res)=>{try{const subject=String(req.body.subject||'').trim().slice(0,100),message=String(req.body.message||'').trim().slice(0,2000);if(!message)return res.status(400).json({error:'پیام پشتیبانی الزامی است'});const r=await q('INSERT INTO support_requests(user_id,subject,message) VALUES($1,$2,$3) RETURNING id,created_at',[req.user.id,subject,message]);res.json({ok:true,id:Number(r.rows[0].id),created_at:r.rows[0].created_at});}catch(e){console.error('support',e);res.status(500).json({error:'ارسال درخواست پشتیبانی ناموفق بود'})}});
+app.post('/api/support', auth, requireNotBanned, async (req,res)=>{try{const subject=String(req.body.subject||'').trim().slice(0,100),message=String(req.body.message||'').trim().slice(0,2000);if(!message)return res.status(400).json({error:'پیام پشتیبانی الزامی است'});const r=await q('INSERT INTO support_requests(user_id,subject,message) VALUES($1,$2,$3) RETURNING id,created_at',[req.user.id,subject,message]);res.json({ok:true,id:Number(r.rows[0].id),created_at:r.rows[0].created_at});}catch(e){console.error('support',e);res.status(500).json({error:'ارسال درخواست پشتیبانی ناموفق بود'})}});
 
 app.get('/api/saved', auth, async (req, res) => {
   const r = await q(`SELECT s.id AS saved_id,s.created_at AS saved_at,m.* FROM saved_messages s
@@ -916,7 +933,7 @@ io.on('connection', async socket => {
       socket.emit('message_hidden',Number(m.id));
     }
   }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', async d => { try { const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; const cr=await q(`INSERT INTO calls(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(cr.rows[0].id); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
+  socket.on('call:offer', async d => { try { if(req.user?.banned){io.to('user:'+uid).emit('call:blocked',{banUntil:req.user.ban_until,reason:req.user.ban_reason});return;} const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; const cr=await q(`INSERT INTO calls(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(cr.rows[0].id); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
   socket.on('call:answer', async d => { try { if(d.callId) await q(`UPDATE calls SET status='answered',answered_at=now() WHERE id=$1`,[Number(d.callId)]); io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer,callId:d.callId}); } catch(e){console.error('call answer',e)} });
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate,callId:d.callId}));
   socket.on('call:end', async d => { try { const dur=Math.max(0,Number(d.duration||0)); const status=d.reason||((dur>0)?'completed':'ended'); if(d.callId){await q(`UPDATE calls SET status=$2,duration=$3,ended_at=now() WHERE id=$1`,[Number(d.callId),status,dur]);}else{await q(`UPDATE calls SET status=$3,duration=$4,ended_at=now() WHERE id=(SELECT id FROM calls WHERE ((caller_id=$1 AND receiver_id=$2) OR (caller_id=$2 AND receiver_id=$1)) AND status='ringing' ORDER BY id DESC LIMIT 1)`,[uid,Number(d.to),status,dur]);} io.to('user:'+Number(d.to)).emit('call:end',{from:uid,callId:d.callId,reason:d.reason,duration:dur}); } catch(e){console.error('call end',e)} });
@@ -1227,7 +1244,7 @@ async function handleConfiguredBotCommand(cid, uid, rawText){
 
 // Inline button callback endpoint. The bot token is deliberately not exposed
 // to the browser; the message itself identifies the bot that owns the button.
-app.post('/api/messages/:id/bot-button', auth, async(req,res)=>{
+app.post('/api/messages/:id/bot-button', auth, requireNotBanned, async(req,res)=>{
   try{
     const mid=Number(req.params.id), buttonIndex=Number(req.body.buttonIndex);
     const mr=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[mid]);
@@ -1686,6 +1703,10 @@ async function ensureAdminSchema(){
   await q(`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS closed_by bigint`);
   await q(`CREATE TABLE IF NOT EXISTS support_messages (id bigint generated by default as identity primary key, support_id bigint NOT NULL REFERENCES support_requests(id) ON DELETE CASCADE, sender_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE, text text NOT NULL, is_admin boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`);
   await q(`CREATE INDEX IF NOT EXISTS support_messages_support_idx ON support_messages(support_id,created_at)`);
+  await q(`CREATE TABLE IF NOT EXISTS user_warnings(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,admin_user_id BIGINT,reason TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE INDEX IF NOT EXISTS user_warnings_user_idx ON user_warnings(user_id,created_at DESC)`);
+  const adminEmail=String(process.env.ADMIN_EMAIL||'admin@zento.com').toLowerCase();
+  if(!(await q('SELECT 1 FROM users WHERE lower(email)=lower($1)',[adminEmail])).rowCount){const rawPass=String(process.env.ADMIN_DEFAULT_PASSWORD||crypto.randomBytes(18).toString('base64url'));const h=await bcrypt.hash(rawPass,12);const u=await q(`INSERT INTO users(username,email,password_hash,display_name) VALUES('admin',$1,$2,'ادمین') RETURNING id`,[adminEmail,h]);await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,'admin',$2,true,0) ON CONFLICT(user_id) DO NOTHING`,[u.rows[0].id,JSON.stringify({support:true,reports:true,users:true,ban:true,admins:false,audit:true})]);}
 }
 async function logAdmin(adminId,action,targetId,details={}){try{await q('INSERT INTO admin_audit_logs(admin_user_id,action,target_id,details) VALUES($1,$2,$3,$4)',[adminId||null,action,targetId||null,JSON.stringify(details||{})])}catch(e){console.error('audit',e.message)}}
 async function isSiteAdmin(userId, permission){try{const r=await q('SELECT permissions,active FROM site_admins WHERE user_id=$1',[Number(userId)]);if(!r.rowCount||!r.rows[0].active)return false;const p=r.rows[0].permissions||{};return p[permission]===true || p.all===true}catch{return false}}
