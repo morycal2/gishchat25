@@ -360,3 +360,15 @@ body.dark .bot-commands-panel .bot-keyboard-btn{color:#fff;background:#202d38;bo
   .call-actions button{min-width:74px!important;padding:0 9px!important}
   .call-actions button .control-label{display:inline!important}
 }
+
+/* Call ringtone upload + natural categorized emoji picker */
+.call-settings-card{padding:2px 0}
+.ringtone-upload-row,.ringtone-preview-row{display:flex;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.setting-file-name{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.call-timeout-note{margin-top:14px;padding:12px;border-radius:12px;background:rgba(51,144,236,.08);color:var(--muted);font-size:10px}
+.emoji-category-tabs{display:flex;gap:5px;overflow-x:auto;padding:6px 2px 8px;scrollbar-width:none}
+.emoji-category-tabs::-webkit-scrollbar{display:none}
+.emoji-category-tabs button{flex:0 0 auto;padding:7px 10px;border-radius:10px;background:transparent;color:var(--muted);font-size:10px;white-space:nowrap}
+.emoji-category-tabs button.active{background:#e8f4ff;color:var(--accent);font-weight:700}
+.emoji-grid{grid-template-columns:repeat(9,1fr);gap:4px;height:230px}
+.emoji-grid button{font-family:"Noto Color Emoji","Apple Color Emoji","Segoe UI Emoji",sans-serif;font-size:24px;line-height:1;min-height:34px;display:grid;place-items:center}
