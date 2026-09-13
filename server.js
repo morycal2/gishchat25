@@ -1569,6 +1569,12 @@ async function ensureStage3Schema(){
   await q(`CREATE INDEX IF NOT EXISTS messages_file_idx ON messages(conversation_id,kind,id DESC)`);
 }
 
+async function ensureEarlyUserColumns(){
+  // BotFather is bootstrapped before the full admin migration. Keep the
+  // columns it touches available on older Railway databases.
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false`);
+}
+
 async function ensureBotFather(){
   // System account used by the built-in @BotFather assistant.
   const existing=await q("SELECT id,username,display_name,avatar,bio FROM users WHERE lower(username)=lower('BotFather') LIMIT 1");
@@ -1963,6 +1969,7 @@ async function start(){
   await ensureCriticalRuntimeSchema();
   await ensureStage3Schema();
   await ensureStage4Schema();
+  await ensureEarlyUserColumns();
   await ensureBotFatherSchema();
   await ensureBotFather();
   await ensureStage5Schema();
