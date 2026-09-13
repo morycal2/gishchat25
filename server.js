@@ -148,6 +148,7 @@ async function auth(req, res, next) {
     }
     const u = await getUser(d.id);
     if (!u) throw new Error('user');
+    if (u.ban_until && new Date(u.ban_until).getTime() > Date.now()) { return res.status(403).json({ error: 'حساب شما تا '+new Date(u.ban_until).toLocaleString('fa-IR')+' محدود شده است', ban_until: u.ban_until }); }
     req.user = u; next();
   } catch { res.status(401).json({ error: 'نشست نامعتبر است' }); }
 }
@@ -158,6 +159,8 @@ function isSuperAdminCredentials(email, password) {
 }
 function superadminToken() { return jwt.sign({ id: 0, role: 'superadmin', email: SUPERADMIN_EMAIL }, JWT_SECRET, { expiresIn: '12h' }); }
 function requireSuperAdmin(req,res,next){ if(req.user?.role!=='superadmin') return res.status(403).json({error:'دسترسی پنل مدیریت فقط برای سازنده است'}); next(); }
+async function requireAdminPermission(permission,req,res,next){if(req.user?.role==='superadmin')return next();if(await isSiteAdmin(req.user?.id,permission))return next();return res.status(403).json({error:'این بخش در سطح دسترسی شما نیست'})}
+async function requireAnyAdmin(req,res,next){if(req.user?.role==='superadmin')return next();const ok=await Promise.all(['users','ban','reports','support','audit'].map(x=>isSiteAdmin(req.user?.id,x)));if(ok.some(Boolean))return next();return res.status(403).json({error:'دسترسی پنل مدیریت ندارید'})}
 
 app.get('/health', async (_req, res) => {
   try { await q('SELECT 1'); res.json({ ok: true, service: 'zento-chat', database: 'postgres', storage: STORAGE_BUCKET, time: new Date().toISOString() }); }
@@ -192,42 +195,91 @@ app.post('/api/login', async (req, res) => {
     }
     const u = await getUserRawByEmail(email);
     if (!u || !(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'ایمیل یا رمز عبور اشتباه است' });
+    if (u.ban_until && new Date(u.ban_until).getTime() > Date.now()) return res.status(403).json({ error: 'حساب شما تا '+new Date(u.ban_until).toLocaleString('fa-IR')+' محدود شده است', ban_until:u.ban_until });
     res.json({ token: tokenFor(u), user: safeUser(u) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ورود ناموفق بود' }); }
 });
 async function adminQuery(sql, params=[], fallbackRows=[]) {
   try { return await q(sql, params); } catch (e) { console.error('admin query:', e.message); return { rows: fallbackRows, rowCount: fallbackRows.length }; }
 }
-app.get('/api/admin/overview', auth, requireSuperAdmin, async (req,res)=>{
+app.get('/api/admin/overview', auth, requireAnyAdmin, async (req,res)=>{
   try{
     const [u,c,m,cl,s]=await Promise.all([
-      adminQuery('SELECT count(*)::int n FROM users WHERE COALESCE(is_bot,false)=false'),
+      adminQuery('SELECT count(*)::int n FROM users'),
       adminQuery('SELECT count(*)::int n FROM conversations'),
       adminQuery('SELECT count(*)::int n FROM messages WHERE deleted=false'),
       adminQuery('SELECT count(*)::int n FROM calls'),
       adminQuery('SELECT count(*)::int n FROM support_requests')
     ]);
-    const recent=await adminQuery(`SELECT id,display_name,username,email,created_at,is_bot FROM users ORDER BY id DESC LIMIT 20`);
+    const recent=await adminQuery(`SELECT id,display_name,username,email,created_at,false AS is_bot FROM users ORDER BY id DESC LIMIT 20`);
     const calls=await adminQuery(`SELECT c.id,c.status,c.duration,c.created_at,c.type,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 30`);
-    const supports=await adminQuery(`SELECT sr.id,sr.subject,sr.message,sr.created_at,u.display_name,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id ORDER BY sr.id DESC LIMIT 30`);
+    const supports=await adminQuery(`SELECT sr.id,sr.subject,sr.message,sr.status,sr.created_at,u.display_name,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id ORDER BY sr.id DESC LIMIT 30`);
     const db=await adminQuery('SELECT NOW() AS server_time');
     res.json({ok:true,stats:{users:Number(u.rows[0]?.n||0),conversations:Number(c.rows[0]?.n||0),messages:Number(m.rows[0]?.n||0),calls:Number(cl.rows[0]?.n||0),support:Number(s.rows[0]?.n||0)},recentUsers:recent.rows.map(x=>({...x,id:Number(x.id)})),recentCalls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)})),support:supports.rows.map(x=>({...x,id:Number(x.id)})),system:{database:'online',serverTime:db.rows[0]?.server_time||new Date().toISOString(),node:process.version,uptime:Math.floor(process.uptime())}});
   }catch(e){console.error('admin overview',e);res.status(500).json({error:'دریافت اطلاعات مدیریت ناموفق بود'})}
 });
-app.get('/api/admin/health', auth, requireSuperAdmin, async (_req,res)=>{
+app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
   const started=Date.now();
   try { await q('SELECT 1'); res.json({ok:true,database:'online',latencyMs:Date.now()-started,uptime:Math.floor(process.uptime()),memory:process.memoryUsage()}); }
   catch(e){res.status(503).json({ok:false,database:'offline',latencyMs:Date.now()-started,error:e.message})}
 });
-app.get('/api/admin/users', auth, requireSuperAdmin, async (req,res)=>{
-  const qv=String(req.query.q||'').trim().toLowerCase();
-  const r=await q(`SELECT id,username,email,display_name,avatar,bio,is_bot,created_at FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
-  res.json(r.rows.map(x=>({...x,id:Number(x.id)})));
+app.get('/api/admin/users', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
+  try {
+    const qv=String(req.query.q||'').trim().toLowerCase();
+    const r=await q(`SELECT id,username,email,display_name,avatar,bio,created_at,ban_until,ban_reason,false AS is_bot FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
+    res.json(r.rows.map(x=>({...x,id:Number(x.id),uid:String(x.uid||String(x.id).padStart(10,'0'))})));
+  } catch(e) { console.error('admin users',e); res.status(502).json({error:'دریافت کاربران ناموفق بود؛ ساختار دیتابیس را بررسی کنید'}); }
 });
-app.get('/api/admin/conversations', auth, requireSuperAdmin, async (req,res)=>{
+app.get('/api/admin/users/search', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
+  const qv=String(req.query.q||'').trim().toLowerCase();
+  const r=await q(`SELECT id,username,email,display_name,avatar,created_at,ban_until,ban_reason,false AS is_bot FROM users WHERE ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%') ORDER BY id DESC LIMIT 200`,[qv]);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id),uid:String(x.id).padStart(10,'0')})));
+});
+app.get('/api/admin/site-admins', auth, requireSuperAdmin, async (_req,res)=>{
+  const r=await q(`SELECT sa.user_id,sa.role,sa.permissions,sa.active,sa.created_at,u.username,u.email,u.display_name,u.avatar
+    FROM site_admins sa JOIN users u ON u.id=sa.user_id ORDER BY sa.created_at DESC`);
+  res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id),permissions:x.permissions||{}})));
+});
+app.post('/api/admin/site-admins', auth, requireSuperAdmin, async (req,res)=>{
+  const uid=Number(req.body.userId), role=String(req.body.role||'support').slice(0,30), permissions=req.body.permissions||{};
+  const u=await getUser(uid); if(!u) return res.status(404).json({error:'کاربر پیدا نشد'});
+  await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,$2,$3,true,0)
+    ON CONFLICT(user_id) DO UPDATE SET role=$2,permissions=$3,active=true`,[uid,role,JSON.stringify(permissions)]);
+  await logAdmin(0,'add_admin',uid,{role,permissions}); res.json({ok:true});
+});
+app.patch('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{
+  const uid=Number(req.params.id), permissions=req.body.permissions||{}, role=String(req.body.role||'support').slice(0,30), active=req.body.active!==false;
+  if(uid===0) return res.status(400).json({error:'سازنده قابل تغییر نیست'});
+  await q('UPDATE site_admins SET role=$1,permissions=$2,active=$3 WHERE user_id=$4',[role,JSON.stringify(permissions),active,uid]); await logAdmin(0,'update_admin',uid,{role,permissions,active}); res.json({ok:true});
+});
+app.delete('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id);if(uid===0)return res.status(400).json({error:'سازنده قابل حذف نیست'});await q('DELETE FROM site_admins WHERE user_id=$1',[uid]);await logAdmin(0,'remove_admin',uid,{});res.json({ok:true})});
+app.post('/api/admin/users/:id/ban', auth, (req,res,next)=>requireAdminPermission('ban',req,res,next), async (req,res)=>{
+  const uid=Number(req.params.id), minutes=Math.max(0,Math.min(525600,Number(req.body.minutes||0))), reason=String(req.body.reason||'محدودیت مدیریتی').slice(0,300);
+  if(!await getUser(uid))return res.status(404).json({error:'کاربر پیدا نشد'});
+  if(minutes===0){await q('UPDATE users SET ban_until=NULL,ban_reason=NULL,updated_at=now() WHERE id=$1',[uid]);await logAdmin(req.user.id,'unban_user',uid,{});return res.json({ok:true,ban_until:null})}
+  const until=new Date(Date.now()+minutes*60000);await q('UPDATE users SET ban_until=$1,ban_reason=$2,updated_at=now() WHERE id=$3',[until,reason,uid]);await logAdmin(req.user.id,'ban_user',uid,{minutes,reason});res.json({ok:true,ban_until:until,ban_reason:reason});
+});
+app.get('/api/admin/reports', auth, (req,res,next)=>requireAdminPermission('reports',req,res,next), async (_req,res)=>{
+  const r=await q(`SELECT r.id,r.reason,r.created_at,r.reported_id,r.reporter_id,r.message_id,r.status,
+    ru.display_name reporter_name,ru.username reporter_username,tu.display_name reported_name,tu.username reported_username,
+    m.text message_text,m.created_at message_created_at FROM reports r JOIN users ru ON ru.id=r.reporter_id JOIN users tu ON tu.id=r.reported_id LEFT JOIN messages m ON m.id=r.message_id ORDER BY r.created_at DESC LIMIT 300`);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id),reporter_id:Number(x.reporter_id),reported_id:Number(x.reported_id),message_id:x.message_id?Number(x.message_id):null})));
+});
+app.patch('/api/admin/reports/:id', auth, (req,res,next)=>requireAdminPermission('reports',req,res,next), async(req,res)=>{const status=String(req.body.status||'reviewed').slice(0,30);await q('ALTER TABLE reports ADD COLUMN IF NOT EXISTS status text not null default \'open\'');await q('UPDATE reports SET status=$1 WHERE id=$2',[status,Number(req.params.id)]);await logAdmin(req.user.id,'report_status',Number(req.params.id),{status});res.json({ok:true})});
+app.post('/api/admin/audit', auth, (req,res,next)=>requireAdminPermission('audit',req,res,next), async(req,res)=>{await logAdmin(req.user.id,String(req.body.action||'manual').slice(0,80),req.body.targetId?Number(req.body.targetId):null,req.body.details||{});res.json({ok:true})});
+app.get('/api/admin/audit', auth, (req,res,next)=>requireAdminPermission('audit',req,res,next), async (_req,res)=>{const r=await q(`SELECT a.id,a.action,a.target_id,a.details,a.created_at,a.admin_user_id,u.display_name,u.username FROM admin_audit_logs a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.created_at DESC LIMIT 300`);res.json(r.rows.map(x=>({...x,id:Number(x.id),target_id:x.target_id?Number(x.target_id):null,details:x.details||{}})))});
+app.get('/api/admin/conversations', auth, requireAnyAdmin, async (req,res)=>{
   const r=await q(`SELECT c.id,c.name,c.type,c.username,c.created_at,c.owner_id,COUNT(cm.user_id)::int members FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.id DESC LIMIT 200`);
   res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null})));
 });
+app.get('/api/admin/support/:id', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id);const sr=await q(`SELECT sr.*,u.display_name,u.username,u.email FROM support_requests sr JOIN users u ON u.id=sr.user_id WHERE sr.id=$1`,[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});const msgs=await q(`SELECT sm.*,u.display_name,u.username FROM support_messages sm JOIN users u ON u.id=sm.sender_id WHERE sm.support_id=$1 ORDER BY sm.created_at ASC`,[id]);res.json({request:sr.rows[0],messages:msgs.rows.map(x=>({...x,id:Number(x.id)}))})});
+app.post('/api/admin/support/:id/messages', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);if(!text)return res.status(400).json({error:'پیام خالی است'});const sr=await q('SELECT * FROM support_requests WHERE id=$1',[id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,true) RETURNING *`,[id,req.user.id,text]);await logAdmin(req.user.id,'support_reply',id,{text:text.slice(0,200)});res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});});
+app.post('/api/admin/support/:id/close', auth, async(req,res)=>{if(req.user?.role!=='superadmin' && !(await isSiteAdmin(req.user.id,'support')))return res.status(403).json({error:'دسترسی ندارید'});const id=Number(req.params.id);await q(`UPDATE support_requests SET status='closed',closed_at=now(),closed_by=$1 WHERE id=$2`,[req.user.id,id]);await logAdmin(req.user.id,'support_close',id,{});res.json({ok:true})});
+app.get('/api/support', auth, async(req,res)=>{const r=await q(`SELECT id,subject,message,status,created_at,closed_at FROM support_requests WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id)})));});
+app.get('/api/support/:id/thread', auth, async(req,res)=>{const id=Number(req.params.id),sr=await q('SELECT * FROM support_requests WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});const msgs=await q(`SELECT sm.*,u.display_name,u.username FROM support_messages sm JOIN users u ON u.id=sm.sender_id WHERE sm.support_id=$1 ORDER BY sm.created_at ASC`,[id]);res.json({request:sr.rows[0],messages:msgs.rows.map(x=>({...x,id:Number(x.id)}))})});
+app.post('/api/support/:id/messages', auth, async(req,res)=>{const id=Number(req.params.id),text=String(req.body.text||'').trim().slice(0,4000);const sr=await q('SELECT * FROM support_requests WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!sr.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});if(sr.rows[0].status==='closed')return res.status(400).json({error:'این مکالمه پایان یافته است'});const r=await q(`INSERT INTO support_messages(support_id,sender_id,text,is_admin) VALUES($1,$2,$3,false) RETURNING *`,[id,req.user.id,text]);res.json({...r.rows[0],id:Number(r.rows[0].id),display_name:req.user.display_name});});
+app.post('/api/support/:id/close', auth, async(req,res)=>{const id=Number(req.params.id);const r=await q(`UPDATE support_requests SET status='closed',closed_at=now(),closed_by=$1 WHERE id=$2 AND user_id=$3 RETURNING id`,[req.user.id,id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'درخواست پیدا نشد'});res.json({ok:true})});
+app.get('/api/admin/me', auth, async(req,res)=>{if(req.user?.role==='superadmin')return res.json({isAdmin:true,superadmin:true,permissions:{all:true}});const r=await q('SELECT role,permissions,active FROM site_admins WHERE user_id=$1',[req.user.id]);if(!r.rowCount||!r.rows[0].active)return res.status(403).json({isAdmin:false});res.json({isAdmin:true,superadmin:false,role:r.rows[0].role,permissions:r.rows[0].permissions||{}})});
 app.get('/api/me', auth, (req, res) => res.json(req.user));
 
 app.get('/api/users', auth, async (req, res) => {
@@ -745,6 +797,7 @@ app.post('/api/users/:id/report', auth, async (req, res) => {
   if (!await getUser(id) || id === req.user.id) return res.status(400).json({ error: 'کاربر نامعتبر است' });
   await q('INSERT INTO reports(reporter_id,reported_id,reason) VALUES($1,$2,$3)',[req.user.id,id,reason]); res.json({ok:true});
 });
+app.post('/api/messages/:id/report', auth, async(req,res)=>{const mid=Number(req.params.id),m=await q('SELECT sender_id FROM messages WHERE id=$1 AND deleted=false',[mid]);if(!m.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});if(Number(m.rows[0].sender_id)===Number(req.user.id))return res.status(400).json({error:'پیام خودتان قابل گزارش نیست'});const reason=String(req.body.reason||'محتوای نامناسب').slice(0,200);await q('INSERT INTO reports(reporter_id,reported_id,message_id,reason) VALUES($1,$2,$3,$4)',[req.user.id,Number(m.rows[0].sender_id),mid,reason]);res.json({ok:true})});
 
 // Private Saved Messages chat. Stored as a hidden conversation so it can
 // reuse the normal message/media pipeline without appearing in the chat list.
@@ -1619,6 +1672,24 @@ async function ensureStage5Schema(){
 
 }
 
+async function ensureAdminSchema(){
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until timestamptz`);
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason text`);
+  await q(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id bigint REFERENCES messages(id) ON DELETE CASCADE`);
+  await q(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'open'`);
+  await q(`CREATE INDEX IF NOT EXISTS reports_status_created_idx ON reports(status,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS site_admins (user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, role text NOT NULL DEFAULT 'support', permissions jsonb NOT NULL DEFAULT '{}'::jsonb, active boolean NOT NULL DEFAULT true, created_by bigint, created_at timestamptz NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS admin_audit_logs (id bigint generated by default as identity primary key, admin_user_id bigint, action text not null, target_id bigint, details jsonb not null default '{}'::jsonb, created_at timestamptz not null default now())`);
+  await q(`CREATE INDEX IF NOT EXISTS admin_audit_created_idx ON admin_audit_logs(created_at DESC)`);
+  await q(`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'open'`);
+  await q(`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS closed_at timestamptz`);
+  await q(`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS closed_by bigint`);
+  await q(`CREATE TABLE IF NOT EXISTS support_messages (id bigint generated by default as identity primary key, support_id bigint NOT NULL REFERENCES support_requests(id) ON DELETE CASCADE, sender_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE, text text NOT NULL, is_admin boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`);
+  await q(`CREATE INDEX IF NOT EXISTS support_messages_support_idx ON support_messages(support_id,created_at)`);
+}
+async function logAdmin(adminId,action,targetId,details={}){try{await q('INSERT INTO admin_audit_logs(admin_user_id,action,target_id,details) VALUES($1,$2,$3,$4)',[adminId||null,action,targetId||null,JSON.stringify(details||{})])}catch(e){console.error('audit',e.message)}}
+async function isSiteAdmin(userId, permission){try{const r=await q('SELECT permissions,active FROM site_admins WHERE user_id=$1',[Number(userId)]);if(!r.rowCount||!r.rows[0].active)return false;const p=r.rows[0].permissions||{};return p[permission]===true || p.all===true}catch{return false}}
+
 async function ensureStorageBucket(){
   const { data, error } = await supabase.storage.listBuckets();
   if (error) throw error;
@@ -1638,6 +1709,7 @@ async function start(){
   await ensureBotFatherSchema();
   await ensureBotFather();
   await ensureStage5Schema();
+  await ensureAdminSchema();
   await ensureStorageBucket();
   server.listen(PORT,()=>console.log(`Zento PostgreSQL backend listening on port ${PORT}`));
 }
