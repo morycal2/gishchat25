@@ -114,7 +114,7 @@ async function getConversation(cid) {
 }
 let currentViewUserId=0;
 async function conversationView(c, viewerId=currentViewUserId) {
-  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio, (EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) AS is_bot
+  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio, (EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) AS is_bot, (EXISTS(SELECT 1 FROM site_admins sa WHERE sa.user_id=u.id AND sa.active=true)) AS is_site_admin
     FROM conversation_members cm JOIN users u ON u.id=cm.user_id
     WHERE cm.conversation_id=$1 ORDER BY cm.user_id`, [c.id]);
   const last = await q(`SELECT id,text,kind,created_at FROM messages WHERE conversation_id=$1 AND deleted=false AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2) ORDER BY id DESC LIMIT 1`, [c.id, viewerId]);
@@ -813,7 +813,8 @@ app.get('/api/users/:id/profile', auth, async (req, res) => {
   const blocked = (await q('SELECT 1 FROM blocks WHERE user_id=$1 AND blocked_id=$2',[req.user.id,id])).rowCount > 0;
   const blockedBy = (await q('SELECT 1 FROM blocks WHERE user_id=$1 AND blocked_id=$2',[id,req.user.id])).rowCount > 0;
   const media=await q('SELECT id,kind,url,name,mime,position FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[id]);
-  res.json({...u,blocked,blockedBy,photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)}))});
+  const siteAdmin=await q('SELECT role,active FROM site_admins WHERE user_id=$1 LIMIT 1',[id]);
+  res.json({...u,blocked,blockedBy,is_site_admin:siteAdmin.rowCount>0 && !!siteAdmin.rows[0].active,is_system_admin:siteAdmin.rowCount>0 && !!siteAdmin.rows[0].active && String(u.username||'').toLowerCase()==='admin',photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)}))});
 });
 
 // ---- Zento Stories + public profile sharing ----
@@ -825,7 +826,8 @@ app.get('/api/public/users/:username/profile', auth, async (req,res)=>{
   const media=await q('SELECT id,kind,url,name,mime,position FROM profile_media WHERE user_id=$1 ORDER BY kind,position,id',[id]);
   const stories=await q(`SELECT s.id,s.kind,s.url,s.text,s.created_at,s.expires_at
     FROM stories s WHERE s.user_id=$1 AND s.expires_at>now() ORDER BY s.created_at DESC`,[id]);
-  res.json({...safeUser(ur.rows[0]),photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),stories:stories.rows.map(x=>({...x,id:Number(x.id)}))});
+  const sa=await q('SELECT role,active FROM site_admins WHERE user_id=$1 LIMIT 1',[id]);
+  res.json({...safeUser(ur.rows[0]),is_site_admin:sa.rowCount>0 && !!sa.rows[0].active,is_system_admin:sa.rowCount>0 && !!sa.rows[0].active && String(ur.rows[0].username||'').toLowerCase()==='admin',photos:media.rows.filter(x=>x.kind==='photo').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),songs:media.rows.filter(x=>x.kind==='song').map(x=>({...x,id:Number(x.id),position:Number(x.position||0)})),stories:stories.rows.map(x=>({...x,id:Number(x.id)}))});
 });
 app.get('/api/stories/feed', auth, async (req,res)=>{
   const r=await q(`SELECT s.id,s.user_id,s.kind,s.url,s.text,s.created_at,s.expires_at,
@@ -851,6 +853,23 @@ app.post('/api/stories', auth, (req,res)=>{
     const r=await q(`INSERT INTO stories(user_id,kind,url,text,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours') RETURNING *`,[req.user.id,req.file.mimetype.startsWith('video/')?'video':'photo',stored.url,text]);
     res.json({...r.rows[0],id:Number(r.rows[0].id),user_id:Number(r.rows[0].user_id)});
   }catch(e){console.error(e);res.status(500).json({error:'ساخت استوری ناموفق بود'})}})
+});
+app.put('/api/stories/:id', auth, (req,res)=>{
+  upload.single('story')(req,res,async err=>{try{
+    if(err)return res.status(400).json({error:err.message||'ویرایش ناموفق بود'});
+    const id=Number(req.params.id);
+    const cur=await q('SELECT * FROM stories WHERE id=$1 AND user_id=$2',[id,req.user.id]);
+    if(!cur.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});
+    const old=cur.rows[0];
+    let url=old.url, kind=old.kind;
+    if(req.file){
+      if(!/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime|ogg))$/.test(req.file.mimetype))return res.status(400).json({error:'عکس یا ویدیوی معتبر انتخاب کنید'});
+      const stored=await uploadToStorage(req.file,'stories',req.user.id); url=stored.url; kind=req.file.mimetype.startsWith('video/')?'video':'photo';
+    }
+    const text=String(req.body.text??old.text??'').trim().slice(0,500);
+    const r=await q('UPDATE stories SET url=$1,kind=$2,text=$3 WHERE id=$4 AND user_id=$5 RETURNING *',[url,kind,text,id,req.user.id]);
+    res.json({...r.rows[0],id:Number(r.rows[0].id),user_id:Number(r.rows[0].user_id)});
+  }catch(e){console.error('story update',e);res.status(500).json({error:'ویرایش استوری ناموفق بود'})}});
 });
 app.post('/api/stories/:id/view', auth, async(req,res)=>{const id=Number(req.params.id);const ok=await q('SELECT 1 FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!ok.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});await q('INSERT INTO story_views(story_id,viewer_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[id,req.user.id]);res.json({ok:true})});
 app.post('/api/stories/:id/reaction', auth, async(req,res)=>{try{const id=Number(req.params.id), reaction=String(req.body.reaction||'❤️').slice(0,8);const st=await q('SELECT user_id FROM stories WHERE id=$1 AND expires_at>now()',[id]);if(!st.rowCount)return res.status(404).json({error:'استوری پیدا نشد'});const ex=await q('SELECT reaction FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);if(ex.rowCount && ex.rows[0].reaction===reaction) await q('DELETE FROM story_reactions WHERE story_id=$1 AND user_id=$2',[id,req.user.id]);else await q('INSERT INTO story_reactions(story_id,user_id,reaction) VALUES($1,$2,$3) ON CONFLICT(story_id,user_id) DO UPDATE SET reaction=EXCLUDED.reaction,created_at=now()',[id,req.user.id,reaction]);const n=await q('SELECT count(*)::int n FROM story_reactions WHERE story_id=$1',[id]);res.json({ok:true,count:Number(n.rows[0].n),mine:!!ex.rowCount&&ex.rows[0].reaction!==reaction});}catch(e){res.status(500).json({error:'ثبت واکنش ناموفق بود'})}});
