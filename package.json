@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "migrate:json": "node scripts/migrate-json.js"
+    "migrate:json": "node scripts/migrate-json.js",
+    "repair:services": "node scripts/repair-service-controls.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
