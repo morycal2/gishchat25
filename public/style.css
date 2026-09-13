@@ -476,3 +476,8 @@ body.dark .bot-commands-panel .bot-keyboard-btn{color:#fff;background:#202d38;bo
 .sa-user-row small{display:block}
 .sa-user-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .sa-user-actions button{white-space:nowrap}
+
+/* Zento v4.31.7+ admin/verification/voice upgrades */
+.verified-badge{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#1d9bf0;color:#fff;font-size:11px;font-weight:900;margin-inline-start:4px;vertical-align:middle;box-shadow:0 0 0 2px rgba(29,155,240,.12)}
+.voice-transcript{display:none;margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(34,158,217,.08);border:1px solid rgba(34,158,217,.18);line-height:1.9;white-space:pre-wrap}.voice-transcript.show{display:block}.voice-transcribe{border:0;background:transparent;cursor:pointer;font-size:11px;padding:3px 5px}
+.sa-main-nav{display:flex;gap:8px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--line)}.sa-main-nav button{padding:10px 16px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);cursor:pointer;font-weight:700}.sa-main-nav button.active{background:var(--accent);color:#fff;border-color:var(--accent)}.sa-section-placeholder{padding:28px;min-height:320px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}.sa-section-placeholder.hidden,.sa-section-messenger.hidden{display:none}.sa-section-messenger{display:block}.sa-body.hidden{display:none!important}

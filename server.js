@@ -93,11 +93,11 @@ function safeUser(row) {
   if (!row) return null;
   return {
     id: Number(row.id), username: row.username, email: row.email || '',
-    display_name: row.display_name, avatar: row.avatar || '', bio: row.bio || '', is_bot: !!row.is_bot, login_blocked: !!row.login_blocked, last_seen_at: row.last_seen_at || null, ban_until: row.ban_until || null, ban_reason: row.ban_reason || null
+    display_name: row.display_name, avatar: row.avatar || '', bio: row.bio || '', is_bot: !!row.is_bot, login_blocked: !!row.login_blocked, last_seen_at: row.last_seen_at || null, verified: !!row.verified, ban_until: row.ban_until || null, ban_reason: row.ban_reason || null
   };
 }
 async function getUser(id) {
-  const r = await q('SELECT id, username, email, display_name, avatar, bio, ban_until, ban_reason, login_blocked, last_seen_at FROM users WHERE id=$1', [Number(id)]);
+  const r = await q('SELECT id, username, email, display_name, avatar, bio, ban_until, ban_reason, login_blocked, last_seen_at, verified FROM users WHERE id=$1', [Number(id)]);
   return safeUser(r.rows[0]);
 }
 async function getUserRawByEmail(email) {
@@ -114,7 +114,7 @@ async function getConversation(cid) {
 }
 let currentViewUserId=0;
 async function conversationView(c, viewerId=currentViewUserId) {
-  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio, (EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) AS is_bot, (EXISTS(SELECT 1 FROM site_admins sa WHERE sa.user_id=u.id AND sa.active=true)) AS is_site_admin
+  const members = await q(`SELECT u.id,u.username,u.email,u.display_name,u.avatar,u.bio,u.verified, (EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) AS is_bot, (EXISTS(SELECT 1 FROM site_admins sa WHERE sa.user_id=u.id AND sa.active=true)) AS is_site_admin
     FROM conversation_members cm JOIN users u ON u.id=cm.user_id
     WHERE cm.conversation_id=$1 ORDER BY cm.user_id`, [c.id]);
   const last = await q(`SELECT id,text,kind,created_at FROM messages WHERE conversation_id=$1 AND deleted=false AND NOT EXISTS (SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2) ORDER BY id DESC LIMIT 1`, [c.id, viewerId]);
@@ -126,16 +126,16 @@ async function conversationView(c, viewerId=currentViewUserId) {
     id: Number(c.id), name: c.name, type: c.type || 'group', created_at: c.created_at,
     last_text: lastText, last_time: m ? m.created_at : c.created_at,
     members: members.rows.map(safeUser), owner_id: c.owner_id ? Number(c.owner_id) : null,
-    description: c.description || '', username: c.username || '', unread_count: Number(unread.rows[0]?.n||0)
+    description: c.description || '', username: c.username || '', verified: !!c.verified, unread_count: Number(unread.rows[0]?.n||0)
   };
 }
 async function messageView(row) {
   const u = await getUser(row.sender_id);
   let display_name=u?.display_name, username=u?.username, avatar=u?.avatar;
   if(row.profile_id){ const pr=await q('SELECT name,username,avatar FROM user_profiles WHERE id=$1',[Number(row.profile_id)]); if(pr.rows[0]){display_name=pr.rows[0].name;username=pr.rows[0].username;avatar=pr.rows[0].avatar||avatar;} }
-  let bot_name=null,bot_username=null;if(row.bot_id){const br=await q('SELECT name,username FROM bots WHERE id=$1',[Number(row.bot_id)]);if(br.rows[0]){bot_name=br.rows[0].name;bot_username=br.rows[0].username;}}
+  let bot_name=null,bot_username=null,bot_verified=false;if(row.bot_id){const br=await q('SELECT name,username,verified FROM bots WHERE id=$1',[Number(row.bot_id)]);if(br.rows[0]){bot_name=br.rows[0].name;bot_username=br.rows[0].username;bot_verified=!!br.rows[0].verified;}}
   return { ...row, id: Number(row.id), conversation_id: Number(row.conversation_id), sender_id: Number(row.sender_id), bot_id: row.bot_id?Number(row.bot_id):null, bot_name, bot_username,
-    reply_to: row.reply_to ? Number(row.reply_to) : null, reactions: row.reactions || {}, display_name, username, avatar };
+    reply_to: row.reply_to ? Number(row.reply_to) : null, reactions: row.reactions || {}, display_name, username, avatar, verified: !!u?.verified, bot_verified };
 }
 function tokenFor(u) { return jwt.sign({ id: Number(u.id) }, JWT_SECRET, { expiresIn: '7d' }); }
 async function auth(req, res, next) {
@@ -290,7 +290,7 @@ app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
 app.get('/api/admin/users', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
   try {
     const qv=String(req.query.q||'').trim().toLowerCase();
-    const r=await q(`SELECT id,username,email,display_name,bio,created_at,ban_until,ban_reason,login_blocked,last_seen_at,false AS is_bot FROM users
+    const r=await q(`SELECT id,username,email,display_name,bio,created_at,ban_until,ban_reason,login_blocked,last_seen_at,verified,false AS is_bot FROM users
       WHERE NOT EXISTS (SELECT 1 FROM site_admins sa WHERE sa.user_id=users.id AND sa.active=true AND lower(users.username)='admin')
       AND ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%')
       ORDER BY id DESC LIMIT 200`,[qv]);
@@ -299,7 +299,7 @@ app.get('/api/admin/users', auth, (req,res,next)=>requireAdminPermission('users'
 });
 app.get('/api/admin/users/search', auth, (req,res,next)=>requireAdminPermission('users',req,res,next), async (req,res)=>{
   const qv=String(req.query.q||'').trim().toLowerCase();
-  const r=await q(`SELECT id,username,email,display_name,created_at,ban_until,ban_reason,login_blocked,last_seen_at,false AS is_bot FROM users
+  const r=await q(`SELECT id,username,email,display_name,created_at,ban_until,ban_reason,login_blocked,last_seen_at,verified,false AS is_bot FROM users
     WHERE NOT EXISTS (SELECT 1 FROM site_admins sa WHERE sa.user_id=users.id AND sa.active=true AND lower(users.username)='admin')
     AND ($1='' OR lower(username) LIKE '%'||$1||'%' OR lower(display_name) LIKE '%'||$1||'%' OR lower(email) LIKE '%'||$1||'%' OR id::text LIKE '%'||$1||'%' OR lpad(id::text,10,'0') LIKE '%'||$1||'%')
     ORDER BY id DESC LIMIT 200`,[qv]);
@@ -324,13 +324,23 @@ app.post('/api/admin/site-admins', auth, requireSuperAdmin, async (req,res)=>{
   if((await q('SELECT 1 FROM users WHERE lower(email)=lower($1)',[email])).rowCount)return res.status(409).json({error:'این ایمیل قبلاً استفاده شده است'});
   const base=(String(req.body.username||'admin').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,24)||'admin'); let username=base,i=1; while((await q('SELECT 1 FROM users WHERE username=$1',[username])).rowCount) username=base+(i++);
   const hash=await bcrypt.hash(password,12);
-  const u=await q(`INSERT INTO users(username,email,password_hash,display_name) VALUES($1,$2,$3,$4) RETURNING id,username,email,display_name,avatar`,[username,email,hash,name]);
+  const u=await q(`INSERT INTO users(username,email,password_hash,display_name,verified) VALUES($1,$2,$3,$4,true) RETURNING id,username,email,display_name,avatar,verified`,[username,email,hash,name]);
   const permissions=req.body.permissions||{support:true,reports:true,users:false,ban:false,admins:false,audit:false};
   await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,'admin',$2,true,0)`,[u.rows[0].id,JSON.stringify(permissions)]);
   await logAdmin(0,'add_admin',u.rows[0].id,{email,permissions}); res.json({ok:true,admin:{...u.rows[0],user_id:Number(u.rows[0].id),permissions}});
 });
 app.patch('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id),permissions=req.body.permissions||{},active=req.body.active!==false;if(uid===0)return res.status(400).json({error:'سازنده قابل تغییر نیست'});await q('UPDATE site_admins SET permissions=$1,active=$2 WHERE user_id=$3',[JSON.stringify(permissions),active,uid]);if(req.body.password){const h=await bcrypt.hash(String(req.body.password),12);await q('UPDATE users SET password_hash=$1 WHERE id=$2',[h,uid]);}await logAdmin(0,'update_admin',uid,{permissions,active});res.json({ok:true})});
 app.delete('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id);if(uid===0)return res.status(400).json({error:'سازنده قابل حذف نیست'});await q('DELETE FROM site_admins WHERE user_id=$1',[uid]);await q('DELETE FROM users WHERE id=$1',[uid]);await logAdmin(0,'remove_admin',uid,{});res.json({ok:true})});
+app.patch('/api/admin/verify/user/:id', auth, requireSuperAdmin, async(req,res)=>{try{const uid=Number(req.params.id);if(!uid)return res.status(400).json({error:'کاربر نامعتبر است'});const protectedOfficial=await q("SELECT 1 FROM users WHERE id=$1 AND (lower(username)='admin' OR lower(username)='botfather' OR EXISTS(SELECT 1 FROM site_admins sa WHERE sa.user_id=users.id AND sa.active=true)) LIMIT 1",[uid]);const verified=protectedOfficial.rowCount?true:req.body.verified!==false;const r=await q('UPDATE users SET verified=$1,updated_at=now() WHERE id=$2 RETURNING id,verified',[verified,uid]);if(!r.rowCount)return res.status(404).json({error:'کاربر پیدا نشد'});await logAdmin(req.user.id,verified?'verify_user':'unverify_user',uid,{});io.to('user:'+uid).emit('profile:verified',{verified});res.json({ok:true,id:uid,verified});}catch(e){res.status(500).json({error:'تغییر تیک آبی ناموفق بود'})}});
+app.get('/api/admin/bots', auth, requireSuperAdmin, async(req,res)=>{try{const r=await q(`SELECT b.id,b.username,b.name,b.description,b.avatar,b.verified,b.bot_user_id,b.created_at,u.display_name AS owner_name FROM bots b LEFT JOIN users u ON u.id=b.owner_id ORDER BY b.id DESC LIMIT 500`);res.json(r.rows.map(x=>({...x,id:Number(x.id),bot_user_id:x.bot_user_id?Number(x.bot_user_id):null,verified:!!x.verified})));}catch(e){res.status(500).json({error:'دریافت ربات‌ها ناموفق بود'})}});
+app.patch('/api/admin/verify/bot/:id', auth, requireSuperAdmin, async(req,res)=>{try{const id=Number(req.params.id),verified=req.body.verified!==false;const r=await q('UPDATE bots SET verified=$1 WHERE id=$2 RETURNING id,verified,bot_user_id',[verified,id]);if(!r.rowCount)return res.status(404).json({error:'ربات پیدا نشد'});if(r.rows[0].bot_user_id)await q('UPDATE users SET verified=$1 WHERE id=$2',[verified,Number(r.rows[0].bot_user_id)]);await logAdmin(req.user.id,verified?'verify_bot':'unverify_bot',id,{});res.json({ok:true,id,verified});}catch(e){res.status(500).json({error:'تغییر تیک آبی ربات ناموفق بود'})}});
+app.patch('/api/admin/verify/conversation/:id', auth, requireSuperAdmin, async(req,res)=>{try{const id=Number(req.params.id),verified=req.body.verified!==false;const r=await q("UPDATE conversations SET verified=$1 WHERE id=$2 AND type IN ('group','channel') RETURNING id,verified",[verified,id]);if(!r.rowCount)return res.status(404).json({error:'گروه یا کانال پیدا نشد'});await logAdmin(req.user.id,verified?'verify_conversation':'unverify_conversation',id,{});io.to('conv:'+id).emit('conversation:verified',{conversationId:id,verified});res.json({ok:true,id,verified});}catch(e){res.status(500).json({error:'تغییر تیک آبی گروه/کانال ناموفق بود'})}});
+app.get('/api/admin/official-accounts', auth, requireSuperAdmin, async(req,res)=>{try{const out=[];const sp=await getSuperAdminProfile();if(sp)out.push({kind:'superadmin',id:0,username:'superadmin',display_name:sp.display_name,email:sp.email,avatar:sp.avatar||'',verified:true});const sys=await getSystemAdminUser();if(sys)out.push({kind:'user',id:Number(sys.id),username:sys.username,display_name:sys.display_name,email:sys.email,avatar:sys.avatar||'',verified:true});const bf=await q("SELECT id,username,display_name,email,avatar,verified FROM users WHERE lower(username)='botfather' LIMIT 1");if(bf.rowCount)out.push({kind:'user',id:Number(bf.rows[0].id),username:bf.rows[0].username,display_name:bf.rows[0].display_name,email:bf.rows[0].email,avatar:bf.rows[0].avatar||'',verified:true});const admins=await q(`SELECT u.id,u.username,u.display_name,u.email,u.avatar,u.verified FROM users u JOIN site_admins sa ON sa.user_id=u.id WHERE sa.active=true AND lower(u.username)<>'admin' ORDER BY u.id`);admins.rows.forEach(x=>out.push({kind:'user',id:Number(x.id),username:x.username,display_name:x.display_name,email:x.email,avatar:x.avatar||'',verified:true}));res.json(out);}catch(e){res.status(500).json({error:'دریافت حساب‌های رسمی ناموفق بود'})}});
+app.patch('/api/admin/official/superadmin', auth, requireSuperAdmin, async(req,res)=>{try{const avatar=String(req.body.avatar||'').trim().slice(0,1000);await q('UPDATE superadmin_profile SET avatar=$1,updated_at=now() WHERE id=1',[avatar]);res.json({ok:true,avatar,verified:true});}catch(e){res.status(500).json({error:'ذخیره عکس سازنده ناموفق بود'})}});
+app.patch('/api/admin/official/user/:id', auth, requireSuperAdmin, async(req,res)=>{try{const uid=Number(req.params.id),avatar=String(req.body.avatar||'').trim().slice(0,1000),name=String(req.body.display_name||'').trim().slice(0,80),bio=String(req.body.bio||'').trim().slice(0,300);const r=await q("UPDATE users SET display_name=CASE WHEN $1='' THEN display_name ELSE $1 END,bio=$2,avatar=$3,verified=true,updated_at=now() WHERE id=$4 RETURNING id,username,email,display_name,avatar,bio,verified",[name,bio,avatar,uid]);if(!r.rowCount)return res.status(404).json({error:'حساب رسمی پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),verified:true});}catch(e){res.status(500).json({error:'ویرایش حساب رسمی ناموفق بود'})}});
+app.patch('/api/admin/official/bot/:id', auth, requireSuperAdmin, async(req,res)=>{try{const id=Number(req.params.id),avatar=String(req.body.avatar||'').trim().slice(0,1000),name=String(req.body.name||'').trim().slice(0,80);const r=await q("UPDATE bots SET avatar=CASE WHEN $1='' THEN avatar ELSE $1 END,name=CASE WHEN $2='' THEN name ELSE $2 END,verified=true WHERE id=$3 RETURNING id,username,name,avatar,verified,bot_user_id",[avatar,name,id]);if(!r.rowCount)return res.status(404).json({error:'ربات پیدا نشد'});if(r.rows[0].bot_user_id)await q('UPDATE users SET avatar=$1,display_name=$2,verified=true WHERE id=$3',[r.rows[0].avatar,r.rows[0].name,Number(r.rows[0].bot_user_id)]);res.json({...r.rows[0],id:Number(r.rows[0].id),verified:true});}catch(e){res.status(500).json({error:'ویرایش ربات رسمی ناموفق بود'})}});
+app.post('/api/messages/:id/transcribe', auth, async(req,res)=>{try{const id=Number(req.params.id);const mr=await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[id]);if(!mr.rowCount)return res.status(404).json({error:'پیام پیدا نشد'});const m=mr.rows[0];if(m.kind!=='voice'||!m.file_url)return res.status(400).json({error:'این پیام صوتی نیست'});if(!(await isMember(m.conversation_id,req.user.id)))return res.status(403).json({error:'دسترسی ندارید'});if(m.transcript)return res.json({ok:true,transcript:m.transcript,cached:true});const key=String(process.env.OPENAI_API_KEY||'').trim();if(!key)return res.status(503).json({error:'تبدیل ویس به متن روی سرور فعال نشده است. OPENAI_API_KEY را تنظیم کنید.'});const audio=await fetch(m.file_url);if(!audio.ok)throw new Error('دریافت فایل صوتی ناموفق بود');const buf=Buffer.from(await audio.arrayBuffer());const ct=audio.headers.get('content-type')||m.file_type||'audio/webm';const form=new FormData();form.append('file',new Blob([buf],{type:ct}),m.file_name||`voice-${id}.webm`);form.append('model',process.env.OPENAI_TRANSCRIBE_MODEL||'gpt-4o-mini-transcribe');form.append('language','fa');const rr=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${key}`},body:form});const data=await rr.json().catch(()=>({}));if(!rr.ok)throw new Error(data.error?.message||`خطای سرویس تبدیل صدا (${rr.status})`);const transcript=String(data.text||'').trim();if(!transcript)return res.status(422).json({error:'متنی از ویس تشخیص داده نشد'});await q('UPDATE messages SET transcript=$1 WHERE id=$2',[transcript,id]);io.to('conv:'+Number(m.conversation_id)).emit('message:transcript',{messageId:id,transcript});res.json({ok:true,transcript});}catch(e){console.error('transcribe',e);res.status(500).json({error:'تبدیل ویس به متن ناموفق بود: '+e.message})}});
+
 app.post('/api/admin/users/:id/ban', auth, (req,res,next)=>requireAdminPermission('ban',req,res,next), async (req,res)=>{
   try{
     const uid=Number(req.params.id), minutes=Math.max(0,Math.min(525600,Number(req.body.minutes||0))), reason=String(req.body.reason||'محدودیت مدیریتی').trim().slice(0,300);
@@ -404,8 +414,8 @@ app.get('/api/admin/audit', auth, (req,res,next)=>requireAdminPermission('audit'
 app.get('/api/admin/conversations', auth, requireAnyAdmin, async (req,res)=>{
   const type=String(req.query.type||'').trim();
   const params=[];let where='';if(type){if(!['group','channel'].includes(type))return res.status(400).json({error:'نوع گفتگو نامعتبر است'});params.push(type);where='WHERE c.type=$1';}
-  const r=await q(`SELECT c.id,c.name,c.type,c.username,c.created_at,c.owner_id,u.display_name AS owner_name,COUNT(cm.user_id)::int members FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id LEFT JOIN users u ON u.id=c.owner_id ${where} GROUP BY c.id,u.display_name ORDER BY c.id DESC LIMIT 300`,params);
-  res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null,members:Number(x.members||0)})));
+  const r=await q(`SELECT c.id,c.name,c.type,c.username,c.created_at,c.owner_id,c.verified,u.display_name AS owner_name,COUNT(cm.user_id)::int members FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id LEFT JOIN users u ON u.id=c.owner_id ${where} GROUP BY c.id,u.display_name ORDER BY c.id DESC LIMIT 300`,params);
+  res.json(r.rows.map(x=>({...x,id:Number(x.id),owner_id:x.owner_id?Number(x.owner_id):null,members:Number(x.members||0),verified:!!x.verified})));
 });
 app.delete('/api/admin/conversations/:id',auth,requireSuperAdmin,async(req,res)=>{try{const id=Number(req.params.id);const r=await q('SELECT id,type,name FROM conversations WHERE id=$1',[id]);if(!r.rowCount)return res.status(404).json({error:'گروه یا کانال پیدا نشد'});if(!['group','channel'].includes(r.rows[0].type))return res.status(400).json({error:'فقط گروه و کانال قابل حذف مدیریتی هستند'});await q('DELETE FROM conversations WHERE id=$1',[id]);await logAdmin(req.user.id,'delete_'+r.rows[0].type,id,{name:r.rows[0].name});res.json({ok:true});}catch(e){console.error('admin conversation delete',e);res.status(500).json({error:'حذف گروه/کانال ناموفق بود'})}});
 
@@ -443,11 +453,11 @@ app.get('/api/bots/resolve/:username', auth, async (req,res)=>{
     if(!r.rowCount)return res.status(404).json({error:'ربات پیدا نشد'});
     const bot=r.rows[0];
     const userId=await ensureBotUser(bot);
-    r=await q(`SELECT b.id AS bot_id,b.username,b.name,b.description,b.avatar,b.owner_id,
+    r=await q(`SELECT b.id AS bot_id,b.username,b.name,b.description,b.avatar,b.verified,b.owner_id,
       u.id AS user_id,u.display_name,u.avatar AS user_avatar,u.bio
       FROM bots b JOIN users u ON u.id=b.bot_user_id WHERE b.id=$1 LIMIT 1`,[bot.id]);
     const x=r.rows[0];
-    res.json({id:Number(x.user_id),bot_id:Number(x.bot_id),username:x.username,display_name:x.name||x.display_name,avatar:x.avatar||x.user_avatar||'',bio:x.description||x.bio||'',is_bot:true,owner_id:Number(x.owner_id)});
+    res.json({id:Number(x.user_id),bot_id:Number(x.bot_id),username:x.username,display_name:x.name||x.display_name,avatar:x.avatar||x.user_avatar||'',bio:x.description||x.bio||'',is_bot:true,verified:!!x.verified,owner_id:Number(x.owner_id)});
   }catch(e){console.error(e);res.status(500).json({error:'بازیابی ربات ناموفق بود'})}
 });
 
@@ -1245,9 +1255,9 @@ async function ensureBotUser(bot){
 }
 
 app.get('/api/bots', auth, (req,res,next)=>requireFeature('bots',req,res,next), async (req,res)=>{
-  try{const r=await q(`SELECT id,username,name,description,avatar,webhook_url,token,bot_user_id,created_at FROM bots WHERE owner_id=$1 ORDER BY id DESC`,[req.user.id]);
+  try{const r=await q(`SELECT id,username,name,description,avatar,verified,webhook_url,token,bot_user_id,created_at FROM bots WHERE owner_id=$1 ORDER BY id DESC`,[req.user.id]);
     for(const b of r.rows) if(!b.bot_user_id) await ensureBotUser(b);
-    const fresh=await q(`SELECT id,username,name,description,avatar,webhook_url,token,bot_user_id,created_at FROM bots WHERE owner_id=$1 ORDER BY id DESC`,[req.user.id]);
+    const fresh=await q(`SELECT id,username,name,description,avatar,verified,webhook_url,token,bot_user_id,created_at FROM bots WHERE owner_id=$1 ORDER BY id DESC`,[req.user.id]);
     res.json(fresh.rows.map(x=>({...x,id:Number(x.id),bot_user_id:x.bot_user_id?Number(x.bot_user_id):null})));
   }catch(e){console.error(e);res.status(500).json({error:'دریافت ربات‌ها ناموفق بود'})}
 });
@@ -1535,6 +1545,7 @@ async function ensureStage1Schema(){
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS profile_id BIGINT REFERENCES user_profiles(id) ON DELETE SET NULL`);
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quote_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcript TEXT NOT NULL DEFAULT ''`);
   await q(`ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ NOT NULL DEFAULT now()`);
   await q(`CREATE TABLE IF NOT EXISTS message_receipts (message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, delivered_at TIMESTAMPTZ, read_at TIMESTAMPTZ, PRIMARY KEY(message_id,user_id))`);
   await q(`CREATE TABLE IF NOT EXISTS message_hidden (message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, hidden_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(message_id,user_id))`);
@@ -1544,6 +1555,7 @@ async function ensureStage1Schema(){
 
 async function ensureStage3Schema(){
   await q(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await q(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE TABLE IF NOT EXISTS conversation_admins (
     conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1560,7 +1572,7 @@ async function ensureStage3Schema(){
 async function ensureBotFather(){
   // System account used by the built-in @BotFather assistant.
   const existing=await q("SELECT id,username,display_name,avatar,bio FROM users WHERE lower(username)=lower('BotFather') LIMIT 1");
-  if(existing.rowCount) return Number(existing.rows[0].id);
+  if(existing.rowCount){ await q('UPDATE users SET verified=true WHERE id=$1',[Number(existing.rows[0].id)]); return Number(existing.rows[0].id); }
   const passwordHash=await bcrypt.hash(crypto.randomBytes(32).toString('hex'),10);
   const r=await q(`INSERT INTO users(username,email,password_hash,display_name,bio)
     VALUES('BotFather','botfather@zento.local',$1,'BotFather','مدیریت و ساخت ربات‌های زنتو')
@@ -1791,6 +1803,7 @@ async function ensureStage4Schema(){
   )`);
   await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS bot_user_id BIGINT UNIQUE REFERENCES users(id) ON DELETE SET NULL`);
   await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT ''`);
+  await q(`ALTER TABLE bots ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE TABLE IF NOT EXISTS bot_updates(
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -1886,6 +1899,7 @@ async function ensureAdminSchema(){
   await q(`INSERT INTO site_controls(id) VALUES(1) ON CONFLICT(id) DO NOTHING`);
   await q(`CREATE INDEX IF NOT EXISTS user_warnings_user_idx ON user_warnings(user_id,created_at DESC)`);
   await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS login_blocked boolean NOT NULL DEFAULT false`);
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verified boolean NOT NULL DEFAULT false`);
   await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NOT NULL DEFAULT now()`);
   await q(`CREATE INDEX IF NOT EXISTS users_last_seen_idx ON users(last_seen_at DESC)`);
   await q(`CREATE TABLE IF NOT EXISTS email_change_requests(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,new_email TEXT NOT NULL,old_email TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),reviewed_at TIMESTAMPTZ,reviewed_by BIGINT,reason TEXT NOT NULL DEFAULT '')`);
@@ -1925,8 +1939,9 @@ async function ensureAdminSchema(){
       if(!taken.rowCount) adminUser=(await q(`UPDATE users SET username='admin',display_name='اطلاع‌رسانی' WHERE id=$1 RETURNING id,username,email,password_hash,display_name`,[adminUser.id])).rows[0];
     }
   }
-  await q("UPDATE users SET display_name='اطلاع‌رسانی' WHERE id=$1",[adminUser.id]);
+  await q("UPDATE users SET display_name='اطلاع‌رسانی',verified=true WHERE id=$1",[adminUser.id]);
   await q(`INSERT INTO site_admins(user_id,role,permissions,active,created_by) VALUES($1,'admin',$2,true,NULL) ON CONFLICT(user_id) DO UPDATE SET active=true, role='admin', permissions=EXCLUDED.permissions`,[adminUser.id,JSON.stringify({support:true,reports:true,users:true,ban:true,admins:false,audit:true})]);
+  await q('UPDATE users SET verified=true WHERE id IN (SELECT user_id FROM site_admins WHERE active=true)');
 }
 async function logAdmin(adminId,action,targetId,details={}){try{await q('INSERT INTO admin_audit_logs(admin_user_id,action,target_id,details) VALUES($1,$2,$3,$4)',[adminId||null,action,targetId||null,JSON.stringify(details||{})])}catch(e){console.error('audit',e.message)}}
 async function isSiteAdmin(userId, permission){try{const r=await q('SELECT permissions,active FROM site_admins WHERE user_id=$1',[Number(userId)]);if(!r.rowCount||!r.rows[0].active)return false;const p=r.rows[0].permissions||{};return p[permission]===true || p.all===true}catch{return false}}
