@@ -168,6 +168,10 @@ function requireSuperAdmin(req,res,next){ if(req.user?.role!=='superadmin') retu
 async function requireAdminPermission(permission,req,res,next){if(req.user?.role==='superadmin')return next();if(await isSiteAdmin(req.user?.id,permission))return next();return res.status(403).json({error:'این بخش در سطح دسترسی شما نیست'})}
 async function requireAnyAdmin(req,res,next){if(req.user?.role==='superadmin')return next();const ok=await Promise.all(['users','ban','reports','support','audit'].map(x=>isSiteAdmin(req.user?.id,x)));if(ok.some(Boolean))return next();return res.status(403).json({error:'دسترسی پنل مدیریت ندارید'})}
 function requireNotBanned(req,res,next){if(req.user?.banned)return res.status(403).json({error:'حساب شما محدود است',ban_until:req.user.ban_until,ban_reason:req.user.ban_reason});next();}
+async function isProtectedSystemAdminId(uid){if(!Number(uid))return false;const r=await q(`SELECT 1 FROM site_admins sa JOIN users u ON u.id=sa.user_id WHERE sa.user_id=$1 AND sa.active=true AND lower(u.username)='admin' LIMIT 1`,[Number(uid)]);return r.rowCount>0;}
+async function isAnySiteAdminId(uid){if(!Number(uid))return false;const r=await q('SELECT 1 FROM site_admins WHERE user_id=$1 AND active=true LIMIT 1',[Number(uid)]);return r.rowCount>0;}
+function banRemainingText(until){const ms=Math.max(0,new Date(until).getTime()-Date.now());const sec=Math.floor(ms/1000),d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60),s=sec%60;return `${d} روز، ${String(h).padStart(2,'0')} ساعت، ${String(m).padStart(2,'0')} دقیقه، ${String(s).padStart(2,'0')} ثانیه`;}
+function banNoticeText(kind,reason,until){if(kind==='unban')return `✅ محدودیت حساب شما توسط ادمین زنتو برداشته شد.\n\nاکنون محدودیت مدیریتی فعالی ندارید.\n\n⚠️ لطفاً قوانین زنتو را رعایت کنید؛ تکرار تخلف می‌تواند باعث محدودیت دوباره شود.`;return `🚫 حساب شما توسط ادمین زنتو محدود شد.\n\nدلیل: ${reason}\n\nپایان دقیق محدودیت: ${new Date(until).toLocaleString('fa-IR')}\nزمان باقی‌مانده: ${banRemainingText(until)}\n\n⚠️ تا پایان محدودیت امکان ارسال پیام، تماس و کنفرانس ندارید. لطفاً قوانین زنتو را رعایت کنید.`;}
 
 app.get('/health', async (_req, res) => {
   try { await q('SELECT 1'); res.json({ ok: true, service: 'zento-chat', database: 'postgres', storage: STORAGE_BUCKET, time: new Date().toISOString() }); }
@@ -265,10 +269,29 @@ app.post('/api/admin/site-admins', auth, requireSuperAdmin, async (req,res)=>{
 app.patch('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id),permissions=req.body.permissions||{},active=req.body.active!==false;if(uid===0)return res.status(400).json({error:'سازنده قابل تغییر نیست'});await q('UPDATE site_admins SET permissions=$1,active=$2 WHERE user_id=$3',[JSON.stringify(permissions),active,uid]);if(req.body.password){const h=await bcrypt.hash(String(req.body.password),12);await q('UPDATE users SET password_hash=$1 WHERE id=$2',[h,uid]);}await logAdmin(0,'update_admin',uid,{permissions,active});res.json({ok:true})});
 app.delete('/api/admin/site-admins/:id', auth, requireSuperAdmin, async (req,res)=>{const uid=Number(req.params.id);if(uid===0)return res.status(400).json({error:'سازنده قابل حذف نیست'});await q('DELETE FROM site_admins WHERE user_id=$1',[uid]);await q('DELETE FROM users WHERE id=$1',[uid]);await logAdmin(0,'remove_admin',uid,{});res.json({ok:true})});
 app.post('/api/admin/users/:id/ban', auth, (req,res,next)=>requireAdminPermission('ban',req,res,next), async (req,res)=>{
-  const uid=Number(req.params.id), minutes=Math.max(0,Math.min(525600,Number(req.body.minutes||0))), reason=String(req.body.reason||'محدودیت مدیریتی').slice(0,300);
-  if(!await getUser(uid))return res.status(404).json({error:'کاربر پیدا نشد'});
-  if(minutes===0){await q('UPDATE users SET ban_until=NULL,ban_reason=NULL,updated_at=now() WHERE id=$1',[uid]);await logAdmin(req.user.id,'unban_user',uid,{});return res.json({ok:true,ban_until:null})}
-  const until=new Date(Date.now()+minutes*60000);await q('UPDATE users SET ban_until=$1,ban_reason=$2,updated_at=now() WHERE id=$3',[until,reason,uid]);await logAdmin(req.user.id,'ban_user',uid,{minutes,reason});const total=minutes,days=Math.floor(total/1440),hours=Math.floor(total%1440/60),mins=total%60;void sendAdminNotice(uid,`🚫 حساب شما توسط ادمین زنتو محدود شد.\nدلیل: ${reason}\nمدت: ${days} روز و ${hours} ساعت و ${mins} دقیقه\nپایان دقیق: ${until.toLocaleString('fa-IR')}`);void pushToUser(uid,{title:'ادمین زنتو',body:`حساب شما محدود شد. دلیل: ${reason}. پایان محدودیت: ${until.toLocaleString('fa-IR')}`,icon:'/zento-icon.png',url:'/'});res.json({ok:true,ban_until:until,ban_reason:reason});
+  try{
+    const uid=Number(req.params.id), minutes=Math.max(0,Math.min(525600,Number(req.body.minutes||0))), reason=String(req.body.reason||'محدودیت مدیریتی').trim().slice(0,300);
+    const target=await getUser(uid); if(!target)return res.status(404).json({error:'کاربر پیدا نشد'});
+    if(await isProtectedSystemAdminId(uid))return res.status(403).json({error:'حساب ادمین سیستمی قابل محدودسازی نیست'});
+    const previousUntil=target.ban_until;
+    if(minutes===0){
+      await q('UPDATE users SET ban_until=NULL,ban_reason=NULL,updated_at=now() WHERE id=$1',[uid]);
+      await logAdmin(req.user.id,'unban_user',uid,{previous_until:previousUntil});
+      const text=banNoticeText('unban');
+      void sendAdminNotice(uid,text);
+      void pushToUser(uid,{title:'ادمین زنتو · رفع محدودیت',body:'محدودیت حساب شما برداشته شد.',icon:'/zento-icon.png',url:'/'});
+      io.to('user:'+uid).emit('moderation:ban',{banned:false,banUntil:null,reason:''});
+      return res.json({ok:true,ban_until:null,ban_reason:null,changed:true});
+    }
+    const until=new Date(Date.now()+minutes*60000);
+    await q('UPDATE users SET ban_until=$1,ban_reason=$2,updated_at=now() WHERE id=$3',[until,reason,uid]);
+    await logAdmin(req.user.id,previousUntil?'change_ban':'ban_user',uid,{minutes,reason,previous_until:previousUntil});
+    const text=banNoticeText('ban',reason,until);
+    void sendAdminNotice(uid,text);
+    void pushToUser(uid,{title:'ادمین زنتو · محدودیت حساب',body:`${reason} | پایان: ${new Date(until).toLocaleString('fa-IR')}`,icon:'/zento-icon.png',url:'/'});
+    io.to('user:'+uid).emit('moderation:ban',{banned:true,banUntil:until,reason});
+    res.json({ok:true,ban_until:until,ban_reason:reason,changed:true,remaining:banRemainingText(until)});
+  }catch(e){console.error('admin ban',e);res.status(500).json({error:'اعمال محدودیت ناموفق بود'})}
 });
 async function getSystemAdminUser(){
   const r=await q(`SELECT u.* FROM users u JOIN site_admins sa ON sa.user_id=u.id WHERE sa.active=true ORDER BY (lower(u.username)='admin') DESC, sa.created_at ASC LIMIT 1`);
@@ -458,6 +481,9 @@ app.get('/api/conversations/:id/messages', auth, async (req, res) => {
 });
 
 async function canMessage(cid, uid) {
+  const actor = await getUser(uid);
+  if(actor?.ban_until && new Date(actor.ban_until).getTime()>Date.now()) return {ok:false,error:`🚫 شما بن شده‌اید. پایان محدودیت: ${new Date(actor.ban_until).toLocaleString('fa-IR')} | باقی‌مانده: ${banRemainingText(actor.ban_until)}`};
+  if(await isProtectedSystemAdminId(uid)) return {ok:false,error:'حساب ادمین زنتو فقط برای اطلاع‌رسانی است و امکان ارسال گفتگوی عادی ندارد'};
   const c = await getConversation(cid);
   if (!c || !await isMember(cid, uid)) return { ok: false, error: 'گفتگو پیدا نشد یا عضو آن نیستید' };
   if (c.type === 'channel' && Number(c.owner_id) !== Number(uid)) {
@@ -919,7 +945,7 @@ io.on('connection', async socket => {
   socket.on('game:end', async cid => { const id=Number(cid); if(!await isMember(id,uid))return; activeGames.delete(gameKey(id)); io.to('conv:'+id).emit('game:ended'); });
   socket.on('typing', async d => { const cid=Number(d.conversationId); if(await isMember(cid,uid)) socket.to('conv:'+cid).emit('typing',{userId:uid,typing:!!d.typing}); });
   socket.on('send_message', async d => {
-    try { const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok)return;
+    try { const live=await getUser(uid); if(live?.ban_until && new Date(live.ban_until).getTime()>Date.now()){socket.emit('moderation:blocked',{kind:'ban',banUntil:live.ban_until,reason:live.ban_reason});return;} if(await isProtectedSystemAdminId(uid)){socket.emit('moderation:blocked',{kind:'system-admin'});return;} const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok){socket.emit('message:blocked',{error:check.error});return;}
       const text=String(d.text||'').trim().slice(0,5000), fileUrl=String(d.fileUrl||'').slice(0,1000), fileType=String(d.fileType||'').slice(0,120), fileName=safeFileName(d.fileName||'');
       if(!text&&!fileUrl)return;
       if(text&&!fileUrl&&await isBotFatherConversation(cid)){
@@ -964,15 +990,15 @@ io.on('connection', async socket => {
       socket.emit('message_hidden',Number(m.id));
     }
   }catch(e){console.error('socket delete',e)} });
-  socket.on('call:offer', async d => { try { if(req.user?.banned){io.to('user:'+uid).emit('call:blocked',{banUntil:req.user.ban_until,reason:req.user.ban_reason});return;} const target=await getUser(Number(d.to)); const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; const cr=await q(`INSERT INTO calls(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(cr.rows[0].id); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
-  socket.on('call:answer', async d => { try { if(d.callId) await q(`UPDATE calls SET status='answered',answered_at=now() WHERE id=$1`,[Number(d.callId)]); io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer,callId:d.callId}); } catch(e){console.error('call answer',e)} });
+  socket.on('call:offer', async d => { try { const live=await getUser(uid); if(live?.ban_until && new Date(live.ban_until).getTime()>Date.now()){socket.emit('call:blocked',{banUntil:live.ban_until,reason:live.ban_reason});return;} if(await isProtectedSystemAdminId(uid)){socket.emit('call:blocked',{systemAdmin:true,reason:'حساب ادمین زنتو فقط برای اطلاع‌رسانی است و امکان تماس ندارد'});return;} const target=await getUser(Number(d.to)); if(!target)return; if(target.ban_until && new Date(target.ban_until).getTime()>Date.now()){socket.emit('call:blocked',{targetBanned:true,banUntil:target.ban_until,reason:target.ban_reason||'کاربر مقصد محدود است'});return;} if(await isProtectedSystemAdminId(target.id)){socket.emit('call:blocked',{systemAdmin:true,reason:'حساب ادمین زنتو فقط برای اطلاع‌رسانی است و امکان تماس و کنفرانس ندارد'});return;} const botTarget=target?.is_bot || (await q('SELECT 1 FROM bots WHERE bot_user_id=$1 LIMIT 1',[Number(d.to)])).rowCount>0; if(botTarget)return; const cr=await q(`INSERT INTO calls(caller_id,receiver_id,type,status) VALUES($1,$2,$3,'ringing') RETURNING id`,[uid,Number(d.to),d.video?'video':'audio']); const callId=Number(cr.rows[0].id); io.to('user:'+Number(d.to)).emit('call:offer',{from:uid,offer:d.offer,video:!!d.video,callId}); const caller=await getUser(uid); void pushToUser(Number(d.to),{title:caller?.display_name||'تماس ورودی',body:!!d.video?'تماس تصویری ورودی':'تماس صوتی ورودی',icon:caller?.avatar||'/zento-icon.png',url:'/'}); } catch(e){ console.error('call offer',e); } });
+  socket.on('call:answer', async d => { try { const live=await getUser(uid); if(live?.ban_until&&new Date(live.ban_until).getTime()>Date.now()){socket.emit('call:blocked',{banUntil:live.ban_until,reason:live.ban_reason});return;} if(await isProtectedSystemAdminId(uid))return; if(d.callId) await q(`UPDATE calls SET status='answered',answered_at=now() WHERE id=$1`,[Number(d.callId)]); io.to('user:'+Number(d.to)).emit('call:answer',{from:uid,answer:d.answer,callId:d.callId}); } catch(e){console.error('call answer',e)} });
   socket.on('call:ice', d => io.to('user:'+Number(d.to)).emit('call:ice',{from:uid,candidate:d.candidate,callId:d.callId}));
   socket.on('call:end', async d => { try { const dur=Math.max(0,Number(d.duration||0)); const status=d.reason||((dur>0)?'completed':'ended'); if(d.callId){await q(`UPDATE calls SET status=$2,duration=$3,ended_at=now() WHERE id=$1`,[Number(d.callId),status,dur]);}else{await q(`UPDATE calls SET status=$3,duration=$4,ended_at=now() WHERE id=(SELECT id FROM calls WHERE ((caller_id=$1 AND receiver_id=$2) OR (caller_id=$2 AND receiver_id=$1)) AND status='ringing' ORDER BY id DESC LIMIT 1)`,[uid,Number(d.to),status,dur]);} io.to('user:'+Number(d.to)).emit('call:end',{from:uid,callId:d.callId,reason:d.reason,duration:dur}); } catch(e){console.error('call end',e)} });
   // Lightweight mesh conference signaling for small groups/channels. Media stays peer-to-peer; server only relays SDP/ICE.
-  socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
-  socket.on('conference:offer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
-  socket.on('conference:answer', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:answer',{room,from:uid,answer:d.answer}); });
-  socket.on('conference:ice', d => { const room=String(d.room||''); io.to('user:'+Number(d.to)).emit('conference:ice',{room,from:uid,candidate:d.candidate}); });
+  socket.on('conference:join', async d => { const room=String(d.room||''); const m=room.match(/^conv:(\d+)$/); if(!m||!await isMember(Number(m[1]),uid))return; const live=await getUser(uid); if(live?.ban_until&&new Date(live.ban_until).getTime()>Date.now()){socket.emit('call:blocked',{banUntil:live.ban_until,reason:live.ban_reason});return;} if(await isProtectedSystemAdminId(uid)){socket.emit('call:blocked',{systemAdmin:true,reason:'حساب ادمین زنتو امکان کنفرانس ندارد'});return;} socket.join(room); const members=await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[Number(m[1])]); const participants=members.rows.map(x=>Number(x.user_id)).filter(x=>x!==uid).slice(0,8); socket.emit('conference:participants',{room,participants}); socket.to(room).emit('conference:peer-joined',{room,userId:uid}); });
+  socket.on('conference:offer', async d => { const room=String(d.room||''); if(await isProtectedSystemAdminId(uid)||await isProtectedSystemAdminId(Number(d.to)))return; io.to('user:'+Number(d.to)).emit('conference:offer',{room,from:uid,offer:d.offer}); });
+  socket.on('conference:answer', async d => { const room=String(d.room||''); if(await isProtectedSystemAdminId(uid)||await isProtectedSystemAdminId(Number(d.to)))return; io.to('user:'+Number(d.to)).emit('conference:answer',{room,from:uid,answer:d.answer}); });
+  socket.on('conference:ice', async d => { const room=String(d.room||''); if(await isProtectedSystemAdminId(uid)||await isProtectedSystemAdminId(Number(d.to)))return; io.to('user:'+Number(d.to)).emit('conference:ice',{room,from:uid,candidate:d.candidate}); });
   socket.on('conference:leave', d => { const room=String(d.room||''); socket.leave(room); socket.to(room).emit('conference:peer-left',{room,userId:uid}); });
   socket.on('disconnect',()=>{const n=(online.get(uid)||1)-1;if(n<=0){online.delete(uid);io.emit('presence',{userId:uid,online:false,devices:0})}else {online.set(uid,n);io.emit('presence',{userId:uid,online:true,devices:n})}});
 });
