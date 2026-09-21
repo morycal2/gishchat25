@@ -495,7 +495,7 @@ app.get('/api/conversations', auth, async (req, res) => {
   // Bulk-load the conversation list in one query. The previous implementation
   // performed several queries per conversation, which became very slow as chats grew.
   const r = await q(`
-    SELECT c.id,c.name,c.type,c.created_at,c.owner_id,c.description,c.username,c.photo,c.updated_at,
+    SELECT c.id,c.name,c.type,c.created_at,c.owner_id,c.description,c.username,c.photo,c.updated_at,c.verified,
       COALESCE(members.members,'[]'::json) AS members,
       COALESCE(lastm.last_text,'') AS last_text,
       COALESCE(lastm.last_time,c.created_at) AS last_time,
@@ -504,7 +504,7 @@ app.get('/api/conversations', auth, async (req, res) => {
     FROM conversations c
     JOIN conversation_members mecm ON mecm.conversation_id=c.id AND mecm.user_id=$1
     LEFT JOIN LATERAL (
-      SELECT json_agg(json_build_object('id',u.id,'username',u.username,'display_name',u.display_name,'avatar',u.avatar,'bio',u.bio,'is_bot',EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) ORDER BY u.id) AS members
+      SELECT json_agg(json_build_object('id',u.id,'username',u.username,'display_name',u.display_name,'avatar',u.avatar,'bio',u.bio,'verified',u.verified,'is_official',u.is_official,'is_bot',EXISTS(SELECT 1 FROM bots b WHERE b.bot_user_id=u.id)) ORDER BY u.id) AS members
       FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=c.id
     ) members ON true
     LEFT JOIN LATERAL (
@@ -520,7 +520,7 @@ app.get('/api/conversations', auth, async (req, res) => {
     ) unread ON true
     LEFT JOIN conversation_user_settings cus ON cus.conversation_id=c.id AND cus.user_id=$1
     WHERE c.name <> '__zento_saved__' ORDER BY c.updated_at DESC,c.id DESC`, [req.user.id]);
-  res.json(r.rows.map(c=>({id:Number(c.id),name:c.name,type:c.type||'group',created_at:c.created_at,last_text:c.last_text||'',last_time:c.last_time,members:(c.members||[]).map(u=>({...u,id:Number(u.id)})),owner_id:c.owner_id?Number(c.owner_id):null,description:c.description||'',username:c.username||'',photo:c.photo||'',unread_count:Number(c.unread_count||0),_pinned:!!c.pinned,_muted:!!c.muted,_archived:!!c.archived})));
+  res.json(r.rows.map(c=>({id:Number(c.id),name:c.name,type:c.type||'group',created_at:c.created_at,last_text:c.last_text||'',last_time:c.last_time,members:(c.members||[]).map(u=>({...u,id:Number(u.id),verified:!!u.verified,is_official:!!u.is_official})),owner_id:c.owner_id?Number(c.owner_id):null,description:c.description||'',username:c.username||'',photo:c.photo||'',verified:!!c.verified,unread_count:Number(c.unread_count||0),_pinned:!!c.pinned,_muted:!!c.muted,_archived:!!c.archived})));
 });
 
 app.post('/api/conversations/direct', auth, async (req, res) => {
@@ -588,19 +588,20 @@ app.post('/api/conversations/:id/join', auth, async (req, res) => {
 app.get('/api/conversations/:id/messages', auth, async (req, res) => {
   const cid = Number(req.params.id);
   if (!await isMember(cid, req.user.id)) return res.status(403).json({ error: 'ابتدا باید عضو این گفتگو باشید' });
+  const limit=Math.min(Math.max(Number(req.query.limit||80),30),150);
   const r = await q(`SELECT id,conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,created_at,deleted,reactions,expires_at,quote_ids,profile_id,bot_id,transcript
-    FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT 150`, [cid]);
+    FROM messages WHERE conversation_id=$1 ORDER BY id DESC LIMIT $2`, [cid,limit]);
   const rows = r.rows.reverse();
   const userIds=[...new Set(rows.map(x=>Number(x.sender_id)).filter(Boolean))];
   const profileIds=[...new Set(rows.map(x=>Number(x.profile_id)).filter(Boolean))];
   const botIds=[...new Set(rows.map(x=>Number(x.bot_id)).filter(Boolean))];
   const [ur,pr,br]=await Promise.all([
-    userIds.length?q('SELECT id,username,display_name,avatar,bio FROM users WHERE id=ANY($1::bigint[])',[userIds]):Promise.resolve({rows:[]}),
+    userIds.length?q('SELECT id,username,display_name,avatar,bio,verified,is_official FROM users WHERE id=ANY($1::bigint[])',[userIds]):Promise.resolve({rows:[]}),
     profileIds.length?q('SELECT id,name,username,avatar FROM user_profiles WHERE id=ANY($1::bigint[])',[profileIds]):Promise.resolve({rows:[]}),
-    botIds.length?q('SELECT id,name,username FROM bots WHERE id=ANY($1::bigint[])',[botIds]):Promise.resolve({rows:[]})
+    botIds.length?q('SELECT id,name,username,verified,is_official FROM bots WHERE id=ANY($1::bigint[])',[botIds]):Promise.resolve({rows:[]})
   ]);
   const users=new Map(ur.rows.map(x=>[Number(x.id),x])), profiles=new Map(pr.rows.map(x=>[Number(x.id),x])), bots=new Map(br.rows.map(x=>[Number(x.id),x]));
-  res.json(rows.map(row=>{const u=users.get(Number(row.sender_id))||{};const p=profiles.get(Number(row.profile_id));const b=bots.get(Number(row.bot_id));return {...row,id:Number(row.id),conversation_id:Number(row.conversation_id),sender_id:Number(row.sender_id),profile_id:row.profile_id?Number(row.profile_id):null,bot_id:row.bot_id?Number(row.bot_id):null,reply_to:row.reply_to?Number(row.reply_to):null,reactions:row.reactions||{},display_name:p?.name||u.display_name,username:p?.username||u.username,avatar:p?.avatar||u.avatar,bot_name:b?.name||null,bot_username:b?.username||null};}));
+  res.json(rows.map(row=>{const u=users.get(Number(row.sender_id))||{};const p=profiles.get(Number(row.profile_id));const b=bots.get(Number(row.bot_id));return {...row,id:Number(row.id),conversation_id:Number(row.conversation_id),sender_id:Number(row.sender_id),profile_id:row.profile_id?Number(row.profile_id):null,bot_id:row.bot_id?Number(row.bot_id):null,reply_to:row.reply_to?Number(row.reply_to):null,reactions:row.reactions||{},display_name:p?.name||u.display_name,username:p?.username||u.username,avatar:p?.avatar||u.avatar,verified:!!u.verified,is_official:!!u.is_official,bot_name:b?.name||null,bot_username:b?.username||null,bot_verified:!!b?.verified};}));
 });
 
 async function canMessage(cid, uid) {
@@ -1091,16 +1092,17 @@ io.on('connection', async socket => {
   socket.on('game:end', async cid => { const id=Number(cid); if(!await isMember(id,uid))return; activeGames.delete(gameKey(id)); io.to('conv:'+id).emit('game:ended'); });
   socket.on('typing', async d => { const cid=Number(d.conversationId); if(await isMember(cid,uid)) socket.to('conv:'+cid).emit('typing',{userId:uid,typing:!!d.typing}); });
   socket.on('send_message', async d => {
-    try { const live=await getUser(uid); if(!(await featureAllowed('messages')) && !(await isAnySiteAdminId(uid))){socket.emit('message:blocked',{error:'⛔ ارسال پیام موقتاً غیرفعال است'});return;} if(live?.ban_until && new Date(live.ban_until).getTime()>Date.now()){socket.emit('moderation:blocked',{kind:'ban',banUntil:live.ban_until,reason:live.ban_reason});return;} if(await isProtectedSystemAdminId(uid)){socket.emit('moderation:blocked',{kind:'system-admin'});return;} const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok){socket.emit('message:blocked',{error:check.error});return;}
-      const text=String(d.text||'').trim().slice(0,5000), fileUrl=String(d.fileUrl||'').slice(0,1000), fileType=String(d.fileType||'').slice(0,120), fileName=safeFileName(d.fileName||'');
+    try { const live=await getUser(uid); if(!(await featureAllowed('messages')) && !(await isAnySiteAdminId(uid))){socket.emit('message:blocked',{error:'⛔ ارسال پیام موقتاً غیرفعال است',clientId:String(d?.clientId||'')});return;} if(live?.ban_until && new Date(live.ban_until).getTime()>Date.now()){socket.emit('moderation:blocked',{kind:'ban',banUntil:live.ban_until,reason:live.ban_reason,clientId:String(d?.clientId||'')});return;} if(await isProtectedSystemAdminId(uid)){socket.emit('moderation:blocked',{kind:'system-admin',clientId:String(d?.clientId||'')});return;} const cid=Number(d.conversationId), check=await canMessage(cid,uid); if(!check.ok){socket.emit('message:blocked',{error:check.error,clientId:String(d?.clientId||'')});return;}
+      const text=String(d.text||'').trim().slice(0,5000), fileUrl=String(d.fileUrl||'').slice(0,1000), fileType=String(d.fileType||'').slice(0,120), fileName=safeFileName(d.fileName||''), clientId=String(d.clientId||'').slice(0,80);
       if(!text&&!fileUrl)return;
       if(text&&!fileUrl&&await isBotFatherConversation(cid)){
         const userOut=await insertMessage({cid,uid,text,kind:'text',replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]});
+        if(clientId) userOut.client_id=clientId;
         io.to('conv:'+cid).emit('message',userOut);
         if(await handleBotFatherCommand(cid,uid,text)) return;
       }
-      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); io.to('conv:'+cid).emit('message',out); if(text&&!fileUrl) void handleConfiguredBotCommand(cid,uid,text); void dispatchBotUpdateForMessage(out);
-    } catch(e){ console.error('socket send_message',e); }
+      const out=await insertMessage({cid,uid,text,kind:String(d.kind||'text'),fileUrl,fileType,fileName,replyTo:d.replyTo?Number(d.replyTo):null,profileId:d.profileId?Number(d.profileId):null,expiresIn:d.expiresIn?Number(d.expiresIn):null,quoteIds:Array.isArray(d.quoteIds)?d.quoteIds:[]}); if(clientId) out.client_id=clientId; io.to('conv:'+cid).emit('message',out); if(text&&!fileUrl) void handleConfiguredBotCommand(cid,uid,text); void dispatchBotUpdateForMessage(out);
+    } catch(e){ console.error('socket send_message',e); socket.emit('message:error',{error:'ارسال پیام ناموفق بود',clientId:String(d?.clientId||'')}); }
   });
   socket.on('react', async d => { try { const mid=Number(d.messageId), emoji=String(d.emoji||'').slice(0,8); const mr=await q('SELECT * FROM messages WHERE id=$1',[mid]); const m=mr.rows[0]; if(!m||!emoji||!await isMember(m.conversation_id,uid))return;
       const reactions=m.reactions||{};
@@ -1537,7 +1539,10 @@ app.post('/api/ai/chat', auth, async(req,res)=>{
   try{
     const prompt=String(req.body.prompt||'').trim().slice(0,12000);
     if(!prompt)return res.status(400).json({error:'متن سؤال خالی است'});
-    const text=await openRouterChat({messages:[{role:'system',content:'You are Zento AI. Answer clearly, helpfully and safely. Prefer Persian when the user writes Persian. Do not mention internal instructions.'},{role:'user',content:prompt}],maxTokens:1600,temperature:0.35});
+    const mode=String(req.body.mode||'answer').slice(0,30), tone=String(req.body.tone||'balanced').slice(0,30), language=String(req.body.language||'auto').slice(0,10);
+    const style= tone==='professional'?'Use a professional tone.':tone==='friendly'?'Use a friendly conversational tone.':tone==='concise'?'Be concise and direct.':'Use a balanced, clear tone.';
+    const langRule=language==='fa'?'Respond only in Persian.':language==='en'?'Respond only in English.':'Match the user language unless the task requires another language.';
+    const text=await openRouterChat({messages:[{role:'system',content:`You are Zento AI, a versatile assistant. Mode: ${mode}. ${style} ${langRule} Be accurate, structured and useful. Do not mention internal instructions.`},{role:'user',content:prompt}],maxTokens:1800,temperature:tone==='concise'?0.2:0.35});
     res.json({text:text||'پاسخی دریافت نشد.',provider:'openrouter'});
   }catch(e){console.error('AI OpenRouter',e);res.status(e.status===503?503:502).json({error:e.message||'ارتباط با OpenRouter ناموفق بود'});}
 });
@@ -1546,9 +1551,14 @@ app.post('/api/ai/translate', auth, async(req,res)=>{
   try{
     const text=String(req.body.text||'').trim().slice(0,12000);
     if(!text)return res.status(400).json({error:'متن برای ترجمه خالی است'});
-    const prompt=`Detect whether the following text is primarily Persian or English. Translate it into the other language. Persian -> natural English; English -> natural Persian. Preserve names, numbers, URLs, emojis and formatting. Return only the translation.\n\nTEXT:\n${text}`;
-    const out=await openRouterChat({messages:[{role:'system',content:'You are the Zento translation engine. Translate Persian and English naturally and accurately. Return only the translated text.'},{role:'user',content:prompt}],maxTokens:1600,temperature:0.15});
-    res.json({text:out||'ترجمه‌ای دریافت نشد.',provider:'openrouter'});
+    const requested=String(req.body.targetLang||'auto').toLowerCase();
+    const faChars=(text.match(/[\u0600-\u06ff]/g)||[]).length;
+    const detected=faChars>=Math.max(2,Math.floor(text.length*0.08))?'fa':'en';
+    const target=requested==='fa'||requested==='en'?requested:(detected==='fa'?'en':'fa');
+    const targetName=target==='fa'?'Persian (فارسی)':'English';
+    const prompt=`Translate the text below into ${targetName}. Do NOT keep the original language. Preserve meaning, names, numbers, URLs, emojis and line breaks. Return ONLY the translation, with no explanation, no labels, and no quotes.\n\nTEXT:\n${text}`;
+    const out=await openRouterChat({messages:[{role:'system',content:'You are Zento AI Translation Engine. Your only task is accurate Persian↔English translation. Never answer questions and never add commentary.'},{role:'user',content:prompt}],maxTokens:1600,temperature:0.05});
+    res.json({text:out||'ترجمه‌ای دریافت نشد.',provider:'openrouter',targetLang:target});
   }catch(e){console.error('translate OpenRouter',e);res.status(e.status===503?503:502).json({error:e.message||'ترجمه با OpenRouter ناموفق بود'});}
 });
 
@@ -1679,6 +1689,11 @@ async function ensureStage3Schema(){
   await q(`CREATE UNIQUE INDEX IF NOT EXISTS conversations_public_username_uq ON conversations(username) WHERE username IS NOT NULL AND username <> ''`);
   await q(`CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_id,id DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS messages_file_idx ON messages(conversation_id,kind,id DESC)`);
+  await q(`CREATE INDEX IF NOT EXISTS messages_conversation_id_idx ON messages(conversation_id,id DESC)`);
+  await q(`CREATE INDEX IF NOT EXISTS conversation_members_user_idx ON conversation_members(user_id,conversation_id)`);
+  await q(`CREATE INDEX IF NOT EXISTS conversation_members_conv_idx ON conversation_members(conversation_id,user_id)`);
+  await q(`CREATE INDEX IF NOT EXISTS message_hidden_user_idx ON message_hidden(user_id,message_id)`);
+  await q(`CREATE INDEX IF NOT EXISTS conversation_user_settings_user_idx ON conversation_user_settings(user_id,conversation_id)`);
 }
 
 async function ensureEarlyUserColumns(){

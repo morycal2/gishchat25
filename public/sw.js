@@ -1,4 +1,4 @@
-const CACHE='zento-v4.31.12';
+const CACHE='zento-v4.31.13';
 const CORE=['/','/index.html','/style.css','/app.js?v=112','/config.js','/manifest.json','/zento-icon.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
