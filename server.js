@@ -1581,7 +1581,7 @@ app.post('/api/messages/:id/transcribe', auth, async(req,res)=>{
     const ext=type.includes('ogg')?'ogg':type.includes('wav')?'wav':type.includes('mpeg')?'mp3':type.includes('mp4')?'m4a':'webm';
     const fd=new FormData();
     fd.append('file',new Blob([bytes],{type}),`zento-voice-${id}.${ext}`);
-    fd.append('model',model);fd.append('language','fa');fd.append('response_format','json');fd.append('temperature','0');
+    fd.append('model',model);fd.append('language','fa');fd.append('prompt','زبان فایل صوتی فارسی است. متن را فقط به فارسی پیاده‌سازی کن و اعداد و نام‌ها را تا حد ممکن حفظ کن.');fd.append('response_format','json');fd.append('temperature','0');
     const gr=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{'Authorization':`Bearer ${key}`},body:fd});
     const data=await gr.json().catch(()=>({}));
     if(!gr.ok)return res.status(gr.status===401?502:gr.status).json({error:gr.status===401?'کلید GROQ_API_KEY نامعتبر است.':gr.status===429?'سهمیه Groq برای تبدیل ویس کافی نیست.':String(data?.error?.message||'تبدیل ویس ناموفق بود')});
