@@ -31,7 +31,46 @@
   <div id="botCommandsPanel" class="bot-commands-panel hidden"></div><div id="emojiPanel" class="emoji-panel hidden"><div class="emoji-tabs"><button class="active" data-media-tab="emoji">😀 ایموجی</button><button data-media-tab="gif">GIF</button><button data-media-tab="sticker">🧩 استیکر</button></div><div id="emojiBody"></div></div>
 </main></div>
 
-<div id="drawerShade" class="drawer-shade hidden"></div><aside id="drawer" class="drawer"><div class="drawer-profile"><button id="drawerBack" class="drawer-back" aria-label="بستن منو">‹</button><button id="drawerAvatar" class="drawer-avatar"><span id="drawerAvatarText">گ</span></button><b id="drawerName">کاربر</b><small id="drawerUser">@user</small></div><div class="drawer-list"><div class="drawer-group"><div class="drawer-group-title">حساب و پروفایل</div><button id="drawerProfile">👤 <span>پروفایل من</span></button><button id="drawerAccounts">👥 <span>حساب‌ها</span><i id="accountCountBadge">1/3</i></button></div><div class="drawer-group"><div class="drawer-group-title">اجتماعی</div><button id="drawerNewGroup">👥 <span>گروه جدید</span></button><button id="drawerNewChannel">📢 <span>کانال جدید</span></button><button id="drawerStories">📸 <span>استوری‌ها</span></button></div><div class="drawer-group"><div class="drawer-group-title">پیام‌ها و رسانه</div><button id="drawerSaved">🔖 <span>پیام‌های ذخیره‌شده</span></button><button id="drawerAnnouncements">📢 <span>اطلاعیه‌ها</span></button><button id="drawerArchived">🗃️ <span>بایگانی شده‌ها</span></button><button id="drawerCallHistory">📞 <span>تاریخچه تماس‌ها</span></button><button id="drawerSupport">🎧 <span>پشتیبانی</span></button></div><div class="drawer-group"><div class="drawer-group-title">تنظیمات</div><button id="drawerLanguage">🌐 <span>تغییر زبان</span><i id="languageState">فارسی</i></button><button id="drawerSettings">⚙️ <span>تنظیمات</span></button><button id="drawerTheme">🌙 <span>حالت شب</span><i id="themeState">خاموش</i></button></div><div class="drawer-sep"></div><button id="drawerLogout" class="drawer-danger">↪ <span>خروج از حساب</span></button></div><div class="drawer-version">Zento · v4.31.14 · Premium Messenger</div></aside>
+<div id="drawerShade" class="drawer-shade hidden"></div><aside id="drawer" class="drawer">
+  <div class="drawer-profile">
+    <button id="drawerBack" class="drawer-back" aria-label="بستن منو">‹</button>
+    <div class="drawer-profile-glow"></div>
+    <div class="drawer-profile-top"><span class="drawer-brand-pill">ZENTO</span><span class="drawer-online"><b></b> آنلاین</span></div>
+    <button id="drawerAvatar" class="drawer-avatar"><span id="drawerAvatarText">گ</span><span class="drawer-avatar-edit">✦</span></button>
+    <div class="drawer-profile-copy"><b id="drawerName">کاربر</b><small id="drawerUser">@user</small></div>
+    <div class="drawer-profile-line"><span>پروفایل فعال</span><i>PERSONAL</i></div>
+  </div>
+  <div class="drawer-list">
+    <div class="drawer-group">
+      <div class="drawer-group-title"><span>حساب و پروفایل</span><small>ACCOUNT</small></div>
+      <button id="drawerProfile"><em class="drawer-icon">👤</em><span>پروفایل من</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerAccounts"><em class="drawer-icon">👥</em><span>حساب‌ها</span><i id="accountCountBadge">2/2</i></button>
+    </div>
+    <div class="drawer-group">
+      <div class="drawer-group-title"><span>اجتماعی</span><small>SOCIAL</small></div>
+      <button id="drawerNewGroup"><em class="drawer-icon">👥</em><span>گروه جدید</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerNewChannel"><em class="drawer-icon">📢</em><span>کانال جدید</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerStories"><em class="drawer-icon">📸</em><span>استوری‌ها</span><i class="drawer-arrow">‹</i></button>
+    </div>
+    <div class="drawer-group">
+      <div class="drawer-group-title"><span>پیام‌ها و رسانه</span><small>MESSAGES</small></div>
+      <button id="drawerSaved"><em class="drawer-icon">🔖</em><span>پیام‌های ذخیره‌شده</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerAnnouncements"><em class="drawer-icon">📢</em><span>اطلاعیه‌ها</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerArchived"><em class="drawer-icon">🗃️</em><span>بایگانی شده‌ها</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerCallHistory"><em class="drawer-icon">📞</em><span>تاریخچه تماس‌ها</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerSupport"><em class="drawer-icon">🎧</em><span>پشتیبانی</span><i class="drawer-arrow">‹</i></button>
+    </div>
+    <div class="drawer-group">
+      <div class="drawer-group-title"><span>تنظیمات</span><small>SETTINGS</small></div>
+      <button id="drawerLanguage"><em class="drawer-icon">🌐</em><span>تغییر زبان</span><i id="languageState">فارسی</i></button>
+      <button id="drawerSettings"><em class="drawer-icon">⚙️</em><span>تنظیمات</span><i class="drawer-arrow">‹</i></button>
+      <button id="drawerTheme"><em class="drawer-icon">🌙</em><span>حالت شب</span><i id="themeState">خاموش</i></button>
+    </div>
+    <div class="drawer-sep"></div>
+    <button id="drawerLogout" class="drawer-danger"><em class="drawer-icon">↪</em><span>خروج از حساب</span><i class="drawer-arrow">‹</i></button>
+  </div>
+  <div class="drawer-version">Zento · v4.31.16 · Premium Messenger</div>
+</aside>
 
 <div id="modal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3 id="modalTitle">ساخت</h3><button id="modalX" class="modal-back" aria-label="بازگشت">‹</button></div><div id="modalBody"></div><div class="modal-actions"><button id="modalCancel">لغو</button><button id="modalOk" class="primary">تأیید</button></div></div></div>
 <div id="profileModal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3>پروفایل من</h3><button id="closeProfile" class="modal-back" aria-label="بازگشت">‹</button></div><div class="profile-preview"><button id="profileAvatarBtn" class="avatar huge">گ</button><div><b id="profileUser"></b><small>برای تغییر عکس روی تصویر بزن</small></div></div><label>نام نمایشی<input id="profileName"></label><label>شناسه کاربری<input id="profileUsername" maxlength="30" placeholder="username"></label><label>بیو<input id="profileBio" maxlength="160"></label><div id="profileMediaManager" class="profile-media-manager"></div><button id="saveProfile" class="primary full">ذخیره تغییرات</button></div></div>
@@ -82,5 +121,5 @@
   </div>
 </div>
 <input id="avatarFile" type="file" hidden accept="image/jpeg,image/png,image/webp,image/gif">
-<script src="app.js?v=113"></script>
+<script src="app.js?v=115"></script>
 </body></html>
