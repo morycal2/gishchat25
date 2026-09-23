@@ -1137,6 +1137,89 @@ function openStoryReplyComposer(st,g){
 
 })();
 
+
+/* ===== ZENTO v4.31.18 — interaction hardening ===== */
+(function(){
+  const safeRun=async(fn)=>{try{await fn()}catch(e){showToast(e?.message||'اجرای این گزینه ناموفق بود',true)}};
+  function bind(id,fn){const el=$(id);if(!el||el.dataset.hardened==='1')return;if(!el.dataset.hardened)el.dataset.hardened='1';el.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();closeDrawer();safeRun(fn)},false)}
+  const wire=()=>{
+    bind('drawerBack',()=>closeDrawer());
+    bind('drawerProfile',()=>openProfile());
+    bind('drawerAccounts',()=>renderAccounts());
+    bind('drawerNewGroup',()=>newGroup());
+    bind('drawerNewChannel',()=>newChannel());
+    bind('drawerStories',()=>openStoriesPanel());
+    bind('drawerSaved',()=>openSaved());
+    bind('drawerAnnouncements',()=>openAnnouncements());
+    bind('drawerArchived',()=>showArchivedChats());
+    bind('drawerCallHistory',()=>openCallHistory());
+    bind('drawerSupport',()=>renderSupportCenter());
+    bind('drawerLanguage',()=>openLanguageCenter());
+    bind('drawerSettings',()=>openSettings());
+    bind('drawerTheme',()=>toggleTheme());
+    bind('drawerLogout',()=>logout());
+    bind('drawerAvatar',()=>openProfile());
+  };
+  wire();setTimeout(wire,250);setTimeout(wire,1000);
+
+  // If a legacy/cached deployment did not render the advanced entries, restore them here.
+  function ensureAdvancedDrawer(){
+    const list=document.querySelector('.drawer-list'); if(!list)return;
+    const anchor=$('drawerSettings'); if(!anchor)return;
+    if(!$('stage4AiBtn')){
+      const ai=document.createElement('button');ai.id='stage4AiBtn';ai.type='button';ai.className='stage4-drawer-entry ai-entry';ai.innerHTML='<em class="drawer-icon">✨</em><span>دستیار ZENTO AI</span><i class="drawer-arrow">‹</i>';list.insertBefore(ai,anchor);
+    }
+    if(!$('stage4HubBtn')){
+      const hub=document.createElement('button');hub.id='stage4HubBtn';hub.type='button';hub.className='stage4-drawer-entry';hub.innerHTML='<em class="drawer-icon">🚀</em><span>امکانات پیشرفته</span><i class="drawer-arrow">‹</i>';list.insertBefore(hub,anchor);
+    }
+    if(!$('stage4BotsBtn')){
+      const bot=document.createElement('button');bot.id='stage4BotsBtn';bot.type='button';bot.className='stage4-drawer-entry';bot.innerHTML='<em class="drawer-icon">🤖</em><span>مرکز ربات‌ها</span><i class="drawer-arrow">‹</i>';list.insertBefore(bot,anchor);
+    }
+  }
+  ensureAdvancedDrawer();setTimeout(ensureAdvancedDrawer,400);setTimeout(ensureAdvancedDrawer,1200);
+
+  // Message floating panel: delegate at capture phase so parent rows/modals cannot swallow actions.
+  document.addEventListener('click',async e=>{
+    const b=e.target.closest('.msg-actions [data-act]'); if(!b)return;
+    e.preventDefault();e.stopImmediatePropagation();
+    const row=b.closest('[data-msg]');if(!row)return;
+    const id=Number(row.dataset.msg);const m=messageCache[id]||{};const act=b.dataset.act;
+    try{
+      if(act==='reply'){replyTo=id;$('replyPreview').textContent=row.querySelector('.body-text')?.textContent||'پیام چندرسانه‌ای';$('replyBar').classList.remove('hidden');$('text').focus();}
+      else if(act==='translate'){await translateMessageRow(row)}
+      else if(act==='select'){row.classList.toggle('selected');window.selectedStage2Messages=window.selectedStage2Messages||[];const a=window.selectedStage2Messages;window.selectedStage2Messages=row.classList.contains('selected')?[...new Set([...a,id])]:a.filter(x=>x!==id);showToast(`تعداد انتخاب: ${window.selectedStage2Messages.length}`)}
+      else if(act==='link'){const r=await api('/api/messages/'+id+'/link');await navigator.clipboard.writeText(r.url);showToast('لینک پیام کپی شد ✓')}
+      else if(act==='save'){const r=await api('/api/saved/'+id,{method:'POST'});showToast(r.saved?'پیام ذخیره شد ✓':'از ذخیره‌شده‌ها حذف شد ✓')}
+      else if(act==='forward'){const cid=await saPrompt('فوروارد پیام','شناسه گفتگوی مقصد را وارد کنید:','مثلاً 123');if(cid)await api('/api/messages/'+id+'/forward',{method:'POST',body:JSON.stringify({conversationId:Number(cid)})});if(cid)showToast('پیام فوروارد شد ✓')}
+      else if(act==='delete'){if(socket?.connected)socket.emit('delete_message',{id,mode:'for_me'})}
+      else if(act==='deleteAll'){if(await saConfirm('حذف برای همه','این پیام برای همه کاربران حذف شود؟',true)&&socket?.connected)socket.emit('delete_message',{id,mode:'for_everyone'})}
+      else if(act==='react'){const em=promptEmoji();if(em&&socket?.connected)socket.emit('react',{messageId:id,emoji:em})}
+    }catch(err){showToast(err?.message||'عملیات ناموفق بود',true)}
+  },true);
+
+  // Premium support thread: make live incoming support messages render immediately.
+  if(socket){socket.on('support:message',d=>{
+    const holder=$('modalBody');if(!holder||!d?.message)return;
+    const active=holder.querySelector('.support-thread');if(!active)return;
+    const list=holder.querySelector('.support-thread-messages');if(!list)return;
+    const m=d.message;const mine=!m.is_admin;
+    const item=document.createElement('div');item.className='support-thread-msg '+(mine?'mine':'admin');item.innerHTML=`<b>${mine?'شما':'🛡️ پشتیبانی'}</b><p>${esc(m.text||'')}</p><small>${new Date(m.created_at||Date.now()).toLocaleString('fa-IR')}</small>`;list.appendChild(item);list.scrollTop=list.scrollHeight;
+  });}
+
+  // Admin: add persistent up/down controls for the whole management surface.
+  const addAdminScrollControls=()=>{
+    const panel=$('superAdminPanel');if(!panel||panel.querySelector('.sa-scroll-controls'))return;
+    const box=document.createElement('div');box.className='sa-scroll-controls';box.innerHTML='<button type="button" data-sa-scroll="top" title="رفتن به بالا">↑</button><button type="button" data-sa-scroll="bottom" title="رفتن به پایین">↓</button>';
+    panel.appendChild(box);
+    box.querySelector('[data-sa-scroll="top"]').onclick=()=>panel.scrollTo({top:0,behavior:'smooth'});
+    box.querySelector('[data-sa-scroll="bottom"]').onclick=()=>panel.scrollTo({top:panel.scrollHeight,behavior:'smooth'});
+  };
+  const obs=new MutationObserver(addAdminScrollControls);obs.observe(document.body,{childList:true,subtree:true});addAdminScrollControls();
+
+  // Ensure the current deployment asks the browser to update an old service worker.
+  try{navigator.serviceWorker?.getRegistrations?.().then(rs=>rs.forEach(r=>r.update().catch(()=>{})))}catch{}
+})();
+
 // Runtime compatibility guards for cached/older deployments.
 window.stage2HandleMessageHash=window.stage2HandleMessageHash||stage2HandleMessageHash;
 window.selectedStage2Messages=window.selectedStage2Messages||selectedStage2Messages;
