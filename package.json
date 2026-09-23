@@ -1,6 +1,6 @@
 {
   "name": "zento-chat",
-  "version": "4.31.18",
+  "version": "4.31.19",
   "private": true,
   "description": "Zento — secure real-time messaging app with Railway + Supabase",
   "main": "server.js",
