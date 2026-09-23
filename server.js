@@ -76,8 +76,32 @@ app.use(express.static(path.join(__dirname, 'public'), {
 }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 80, standardHeaders: true, legacyHeaders: false });
+const captchaLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
+const CAPTCHA_SECRET = process.env.CAPTCHA_SECRET || JWT_SECRET;
+const usedCaptchaNonces = new Map();
+function b64url(v){ return Buffer.from(v).toString('base64url'); }
+function createCaptcha(){
+  const a=crypto.randomInt(2,13), b=crypto.randomInt(2,13), nonce=crypto.randomBytes(12).toString('hex'), exp=Date.now()+5*60*1000;
+  const payload=JSON.stringify({a,b,nonce,exp});
+  const body=b64url(payload);
+  const sig=crypto.createHmac('sha256',CAPTCHA_SECRET).update(body).digest('base64url');
+  return { token:`${body}.${sig}`, question:`${a} + ${b} = ؟` };
+}
+function verifyCaptcha(token,answer){
+  try{
+    const [body,sig]=String(token||'').split('.'); if(!body||!sig)return false;
+    const expected=crypto.createHmac('sha256',CAPTCHA_SECRET).update(body).digest('base64url');
+    if(!crypto.timingSafeEqual(Buffer.from(sig),Buffer.from(expected)))return false;
+    const p=JSON.parse(Buffer.from(body,'base64url').toString('utf8'));
+    if(!p?.nonce||Date.now()>Number(p.exp)||usedCaptchaNonces.has(p.nonce))return false;
+    const ok=Number(answer)===Number(p.a)+Number(p.b);
+    if(ok){ usedCaptchaNonces.set(p.nonce,Date.now()+5*60*1000); if(usedCaptchaNonces.size>5000){for(const [k,v] of usedCaptchaNonces)if(v<Date.now())usedCaptchaNonces.delete(k);} }
+    return ok;
+  }catch{return false;}
+}
 app.use('/api/login', authLimiter);
 app.use('/api/register', authLimiter);
+app.get('/api/captcha', captchaLimiter, (_req,res)=>res.json(createCaptcha()));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -186,6 +210,7 @@ app.get('/health', async (_req, res) => {
 
 app.post('/api/register', async (req, res) => {
   try { const controls=await getSiteControls(); if(controls.global_enabled===false)return res.status(503).json({error:'⛔ ثبت‌نام موقتاً غیرفعال است.'});
+    if(!verifyCaptcha(req.body.captchaToken,req.body.captchaAnswer)) return res.status(400).json({error:'🛡️ کپچا نادرست یا منقضی شده است. دوباره تلاش کنید.'});
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const displayName = String(req.body.displayName || '').trim().slice(0, 50);
@@ -205,6 +230,7 @@ app.post('/api/register', async (req, res) => {
 
 app.post('/api/login', async (req, res) => {
   try {
+    if(!verifyCaptcha(req.body.captchaToken,req.body.captchaAnswer)) return res.status(400).json({error:'🛡️ کپچا نادرست یا منقضی شده است. دوباره تلاش کنید.'});
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     if (await isSuperAdminCredentials(email, password)) { const sp=await getSuperAdminProfile(); return res.json({token:superadminToken(sp?.email||SUPERADMIN_EMAIL),superadmin:true,user:{id:0,username:'superadmin',email:sp?.email||SUPERADMIN_EMAIL,display_name:sp?.display_name||'مدیر کل زنتو',avatar:sp?.avatar||'',bio:sp?.bio||'',is_bot:false,role:'superadmin'}}); }
