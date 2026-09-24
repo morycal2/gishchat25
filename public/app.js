@@ -805,7 +805,7 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
     const sep=document.createElement('div');sep.className='drawer-sep';
     const stats=document.createElement('button');stats.id='stage3StatsBtn';stats.innerHTML='📊 <span>آمار و نشان‌های من</span>';stats.onclick=()=>{closeDrawer();stage3StatsModal()};
     const badges=document.createElement('button');badges.id='stage3BadgesBtn';badges.innerHTML='🏆 <span>نشان‌های کاربری</span>';badges.onclick=()=>{closeDrawer();stage3BadgesModal()};
-    const anchor=document.getElementById('drawerSettings');list.insertBefore(sep,anchor);list.insertBefore(stats,anchor);list.insertBefore(badges,anchor);
+    const anchor=document.getElementById('drawerSettings');if(anchor && anchor.parentElement===list){list.insertBefore(sep,anchor);list.insertBefore(stats,anchor);list.insertBefore(badges,anchor);}else{list.append(sep,stats,badges);}
   }
   async function stage3StatsModal(){
     try{
@@ -875,7 +875,7 @@ document.addEventListener('click',e=>{const a=e.target.closest('.mention');if(a)
     const hub=document.createElement('button');hub.id='stage4HubBtn';hub.innerHTML='🚀 <span>امکانات پیشرفته</span>';hub.onclick=()=>{closeDrawer();stage4Hub()};
     const bots=document.createElement('button');bots.id='stage4BotsBtn';bots.innerHTML='🤖 <span>ربات‌ها</span>';bots.onclick=()=>{closeDrawer();botsModal()};
     const ai=document.createElement('button');ai.id='stage4AiBtn';ai.innerHTML='✨ <span>دستیار AI</span>';ai.onclick=()=>{closeDrawer();aiModal()};
-    list.insertBefore(sep,document.getElementById('drawerSettings'));list.insertBefore(hub,document.getElementById('drawerSettings'));list.insertBefore(bots,document.getElementById('drawerSettings'));list.insertBefore(ai,document.getElementById('drawerSettings'));applyLanguage();
+    const anchor=document.getElementById('drawerSettings');if(anchor && anchor.parentElement===list){list.insertBefore(sep,anchor);if(anchor.parentElement===list)if(anchor && anchor.parentElement===list)list.insertBefore(hub,anchor);else list.append(hub);else list.append(hub);list.insertBefore(bots,anchor);if(anchor.parentElement===list)if(anchor && anchor.parentElement===list)list.insertBefore(ai,anchor);else list.append(ai);else list.append(ai);}else{list.append(sep,hub,bots,ai);}applyLanguage();
   }
   async function stage4Hub(){
     const connected=!!socket?.connected;
@@ -1192,15 +1192,15 @@ function openStoryReplyComposer(st,g){
   // If a legacy/cached deployment did not render the advanced entries, restore them here.
   function ensureAdvancedDrawer(){
     const list=document.querySelector('.drawer-list'); if(!list)return;
-    const anchor=$('drawerSettings'); if(!anchor)return;
+    const anchor=$('drawerSettings');
     if(!$('stage4AiBtn')){
-      const ai=document.createElement('button');ai.id='stage4AiBtn';ai.type='button';ai.className='stage4-drawer-entry ai-entry';ai.innerHTML='<em class="drawer-icon">✨</em><span>دستیار ZENTO AI</span><i class="drawer-arrow">‹</i>';list.insertBefore(ai,anchor);
+      const ai=document.createElement('button');ai.id='stage4AiBtn';ai.type='button';ai.className='stage4-drawer-entry ai-entry';ai.innerHTML='<em class="drawer-icon">✨</em><span>دستیار ZENTO AI</span><i class="drawer-arrow">‹</i>';if(anchor && anchor.parentElement===list)list.insertBefore(ai,anchor);else list.append(ai);
     }
     if(!$('stage4HubBtn')){
-      const hub=document.createElement('button');hub.id='stage4HubBtn';hub.type='button';hub.className='stage4-drawer-entry';hub.innerHTML='<em class="drawer-icon">🚀</em><span>امکانات پیشرفته</span><i class="drawer-arrow">‹</i>';list.insertBefore(hub,anchor);
+      const hub=document.createElement('button');hub.id='stage4HubBtn';hub.type='button';hub.className='stage4-drawer-entry';hub.innerHTML='<em class="drawer-icon">🚀</em><span>امکانات پیشرفته</span><i class="drawer-arrow">‹</i>';if(anchor && anchor.parentElement===list)list.insertBefore(hub,anchor);else list.append(hub);
     }
     if(!$('stage4BotsBtn')){
-      const bot=document.createElement('button');bot.id='stage4BotsBtn';bot.type='button';bot.className='stage4-drawer-entry';bot.innerHTML='<em class="drawer-icon">🤖</em><span>مرکز ربات‌ها</span><i class="drawer-arrow">‹</i>';list.insertBefore(bot,anchor);
+      const bot=document.createElement('button');bot.id='stage4BotsBtn';bot.type='button';bot.className='stage4-drawer-entry';bot.innerHTML='<em class="drawer-icon">🤖</em><span>مرکز ربات‌ها</span><i class="drawer-arrow">‹</i>';if(anchor.parentElement===list)list.insertBefore(bot,anchor);else list.append(bot);
     }
   }
   ensureAdvancedDrawer();setTimeout(ensureAdvancedDrawer,400);setTimeout(ensureAdvancedDrawer,1200);

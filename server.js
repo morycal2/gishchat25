@@ -1646,8 +1646,6 @@ app.get('/api/games/:conversationId', auth, async(req,res)=>{const cid=Number(re
 
 // ---- Replace the generic socket connection with Stage 4 sync/game hooks ----
 
-app.use('/api',(req,res)=>res.status(404).json({error:'API endpoint not found'}));
-
 // ---- Zento Film & Series ----
 app.get('/api/films', auth, async (req,res)=>{
   try{
@@ -1678,6 +1676,9 @@ app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('
   }catch(e){res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}
 });
 app.delete('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id);const r=await q('DELETE FROM films WHERE id=$1 RETURNING id',[id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'delete_film',id,{});res.json({ok:true})}catch(e){res.status(500).json({error:'حذف محتوا ناموفق بود'})}});
+
+// Generic API 404 fallback (must be after all concrete /api routes).
+app.use('/api',(req,res)=>res.status(404).json({error:'API endpoint not found'}));
 
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 
