@@ -1656,6 +1656,28 @@ app.get('/api/films', auth, async (req,res)=>{
 app.get('/api/films/:id', auth, async (req,res)=>{
   try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),year:r.rows[0].year?Number(r.rows[0].year):null,duration_minutes:r.rows[0].duration_minutes?Number(r.rows[0].duration_minutes):null,active:true});}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}
 });
+const filmUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (_req,file,cb)=>{
+    const ok=/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.mimetype);
+    cb(ok?null:new Error('فقط فایل پوستر تصویری یا ویدیوی فیلم مجاز است'),ok);
+  }
+});
+app.post('/api/admin/films/upload', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), (req,res)=>{
+  filmUpload.single('file')(req,res,async err=>{
+    try{
+      if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
+      if(!req.file)return res.status(400).json({error:'فایلی انتخاب نشده است'});
+      const kind=String(req.body.kind||'');
+      const isPoster=/^image\//.test(req.file.mimetype),isVideo=/^video\//.test(req.file.mimetype);
+      if(kind==='poster'&&!isPoster)return res.status(400).json({error:'برای پوستر یک تصویر انتخاب کنید'});
+      if(kind==='video'&&!isVideo)return res.status(400).json({error:'برای ویدیو یک فایل ویدیویی انتخاب کنید'});
+      const stored=await uploadToStorage(req.file,'films',req.user.id);
+      res.json({ok:true,url:stored.url,path:stored.path,name:safeFileName(req.file.originalname),mime:req.file.mimetype,size:req.file.size});
+    }catch(e){console.error('film upload',e);res.status(500).json({error:'ذخیره فایل فیلم ناموفق بود'});}
+  });
+});
 app.get('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
   try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active})))}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}
 });
@@ -2189,8 +2211,10 @@ async function ensureStorageBucket(){
   const { data, error } = await supabase.storage.listBuckets();
   if (error) throw error;
   if (!data.some(b => b.name === STORAGE_BUCKET)) {
-    const { error: createError } = await supabase.storage.createBucket(STORAGE_BUCKET, { public: true, fileSizeLimit: '50MB' });
+    const { error: createError } = await supabase.storage.createBucket(STORAGE_BUCKET, { public: true, fileSizeLimit: '500MB' });
     if (createError && !/already exists/i.test(createError.message || '')) throw createError;
+  } else {
+    try { await supabase.storage.updateBucket(STORAGE_BUCKET, { public: true, fileSizeLimit: '500MB' }); } catch (e) { console.warn('storage bucket limit update skipped', e.message); }
   }
 }
 
