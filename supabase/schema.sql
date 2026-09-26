@@ -18,6 +18,7 @@ create table if not exists conversations (
   owner_id bigint references users(id) on delete set null,
   username text,
   description text not null default '',
+  photo text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

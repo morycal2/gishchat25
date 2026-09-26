@@ -150,7 +150,7 @@ async function conversationView(c, viewerId=currentViewUserId) {
     id: Number(c.id), name: c.name, type: c.type || 'group', created_at: c.created_at,
     last_text: lastText, last_time: m ? m.created_at : c.created_at,
     members: members.rows.map(safeUser), owner_id: c.owner_id ? Number(c.owner_id) : null,
-    description: c.description || '', username: c.username || '', verified: !!c.verified, unread_count: Number(unread.rows[0]?.n||0)
+    description: c.description || '', username: c.username || '', photo: c.photo || '', verified: !!c.verified, unread_count: Number(unread.rows[0]?.n||0)
   };
 }
 async function messageView(row) {
@@ -302,12 +302,13 @@ app.get('/api/admin/overview', auth, requireAnyAdmin, async (req,res)=>{
       adminQuery('SELECT count(*)::int n FROM support_requests')
     ]);
     const recent=await adminQuery(`SELECT id,display_name,username,email,created_at,false AS is_bot FROM users ORDER BY id DESC LIMIT 20`);
-    const calls=await adminQuery(`SELECT c.id,c.status,c.duration,c.created_at,c.type,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 30`);
+    const calls=(req.user?.role==='superadmin')?await adminQuery(`SELECT c.id,c.status,c.duration,c.created_at,c.type,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.id DESC LIMIT 30`):{rows:[]};
     const supports=await adminQuery(`SELECT sr.id,sr.subject,sr.message,sr.status,sr.created_at,sr.closed_at,sr.admin_read_at,u.display_name,u.email,COALESCE(lu.last_user_at,sr.created_at) last_user_at,la.last_admin_at,CASE WHEN sr.status='closed' THEN 'closed' WHEN COALESCE(lu.last_user_at,sr.created_at)>COALESCE(sr.admin_read_at,'epoch'::timestamptz) THEN 'unread' WHEN la.last_admin_at IS NOT NULL THEN 'answered' ELSE 'unread' END ui_status FROM support_requests sr JOIN users u ON u.id=sr.user_id LEFT JOIN LATERAL(SELECT max(created_at) last_user_at FROM support_messages WHERE support_id=sr.id AND is_admin=false)lu ON true LEFT JOIN LATERAL(SELECT max(created_at) last_admin_at FROM support_messages WHERE support_id=sr.id AND is_admin=true)la ON true ORDER BY sr.id DESC LIMIT 100`);
     const db=await adminQuery('SELECT NOW() AS server_time');
     res.json({ok:true,stats:{users:Number(u.rows[0]?.n||0),conversations:Number(c.rows[0]?.n||0),messages:Number(m.rows[0]?.n||0),calls:Number(cl.rows[0]?.n||0),support:Number(s.rows[0]?.n||0)},recentUsers:recent.rows.map(x=>({...x,id:Number(x.id)})),recentCalls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)})),support:supports.rows.map(x=>({...x,id:Number(x.id)})),system:{database:'online',serverTime:db.rows[0]?.server_time||new Date().toISOString(),node:process.version,uptime:Math.floor(process.uptime())}});
   }catch(e){console.error('admin overview',e);res.status(500).json({error:'دریافت اطلاعات مدیریت ناموفق بود'})}
 });
+app.get('/api/admin/private-activity', auth, requireSuperAdmin, async(req,res)=>{try{const calls=await q(`SELECT c.id,c.type,c.status,c.duration,c.created_at,cu.id caller_id,cu.display_name caller_name,cu.username caller_username,ru.id receiver_id,ru.display_name receiver_name,ru.username receiver_username FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.created_at DESC LIMIT 200`);const chats=await q(`SELECT c.id,c.type,c.name,c.username,c.created_at,c.updated_at,COUNT(DISTINCT cm.user_id)::int members,(SELECT COUNT(*)::int FROM messages m WHERE m.conversation_id=c.id AND m.deleted=false) messages FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 200`);res.json({calls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0),caller_id:x.caller_id?Number(x.caller_id):null,receiver_id:x.receiver_id?Number(x.receiver_id):null})),chats:chats.rows.map(x=>({...x,id:Number(x.id),members:Number(x.members||0),messages:Number(x.messages||0)}))})}catch(e){console.error('private activity',e);res.status(500).json({error:'دریافت فعالیت خصوصی ناموفق بود'})}});
 app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
   const started=Date.now();
   try { await q('SELECT 1'); res.json({ok:true,database:'online',latencyMs:Date.now()-started,uptime:Math.floor(process.uptime()),memory:process.memoryUsage()}); }
@@ -578,7 +579,7 @@ app.post('/api/conversations/group', auth, (req,res,next)=>requireFeature('group
   const valid = await q('SELECT id FROM users WHERE id=ANY($1::bigint[])', [members]);
   const ids = valid.rows.map(x => Number(x.id));
   if (ids.length !== members.length) return res.status(400).json({ error: 'عضو نامعتبر است' });
-  const cr = await q(`INSERT INTO conversations(name,type,owner_id,username,description) VALUES($1,'group',$2,$3,$4) RETURNING *`, [name, req.user.id, username || null, String(req.body.description || '').trim().slice(0, 200)]);
+  const cr = await q(`INSERT INTO conversations(name,type,owner_id,username,description,photo) VALUES($1,'group',$2,$3,$4,$5) RETURNING *`, [name, req.user.id, username || null, String(req.body.description || '').trim().slice(0, 200), String(req.body.photo || '').slice(0,1000)]);
   const c = cr.rows[0];
   for (const uid of ids) await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2)', [c.id, uid]);
   res.json(await conversationView(c, req.user.id));
@@ -590,7 +591,7 @@ app.post('/api/conversations/channel', auth, (req,res,next)=>requireFeature('cha
   const description = String(req.body.description || '').trim().slice(0, 200);
   if (!name || username.length < 3) return res.status(400).json({ error: 'نام کانال و شناسه انگلیسی حداقل ۳ حرفی لازم است' });
   if ((await q("SELECT 1 FROM conversations WHERE type='channel' AND username=$1", [username])).rowCount) return res.status(409).json({ error: 'این شناسه کانال قبلاً استفاده شده است' });
-  const cr = await q(`INSERT INTO conversations(name,type,owner_id,username,description) VALUES($1,'channel',$2,$3,$4) RETURNING *`, [name, req.user.id, username, description]);
+  const cr = await q(`INSERT INTO conversations(name,type,owner_id,username,description,photo) VALUES($1,'channel',$2,$3,$4,$5) RETURNING *`, [name, req.user.id, username, description, String(req.body.photo || '').slice(0,1000)]);
   const c = cr.rows[0];
   await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2)', [c.id, req.user.id]);
   res.json(await conversationView(c, req.user.id));
@@ -1772,6 +1773,7 @@ async function ensurePerformanceIndexes(){
 
 async function ensureStage3Schema(){
   await q(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await q(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS photo TEXT NOT NULL DEFAULT ''`);
   await q(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE TABLE IF NOT EXISTS conversation_admins (
     conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
