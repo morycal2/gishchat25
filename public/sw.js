@@ -1,5 +1,5 @@
 const CACHE='zento-v123.31.22';
-const CORE=['/','/index.html','/style.css','/app.js?v=123','/config.js','/manifest.json','/zento-icon.png'];
+const CORE=['/','/index.html','/style.css','/app.js?v=124','/config.js','/manifest.json','/zento-icon.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
 self.addEventListener('push',e=>{let d={title:'زنتو',body:'پیام جدید',url:'/'};try{d={...d,...e.data.json()}}catch{try{d.body=e.data?.text()||d.body}catch{}}
