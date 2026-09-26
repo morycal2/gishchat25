@@ -1649,12 +1649,12 @@ app.get('/api/games/:conversationId', auth, async(req,res)=>{const cid=Number(re
 // ---- Zento Film & Series ----
 app.get('/api/films', auth, async (req,res)=>{
   try{
-    const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE active=true ORDER BY created_at DESC LIMIT 200`);
-    res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active})));
+    const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE active=true ORDER BY created_at DESC LIMIT 200`);
+    res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[]})));
   }catch(e){console.error('films',e);res.status(500).json({error:'بخش فیلم در دسترس نیست'})}
 });
 app.get('/api/films/:id', auth, async (req,res)=>{
-  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),year:r.rows[0].year?Number(r.rows[0].year):null,duration_minutes:r.rows[0].duration_minutes?Number(r.rows[0].duration_minutes):null,active:true});}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}
+  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),year:r.rows[0].year?Number(r.rows[0].year):null,duration_minutes:r.rows[0].duration_minutes?Number(r.rows[0].duration_minutes):null,active:true});}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}
 });
 const filmUpload = multer({
   storage: multer.memoryStorage(),
@@ -1679,22 +1679,22 @@ app.post('/api/admin/films/upload', auth, (req,res,next)=>requireAdminPermission
   });
 });
 app.get('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
-  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active})))}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}
+  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[]})))}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}
 });
 app.post('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
   try{
-    const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;
+    const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;
     if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});
-    const r=await q(`INSERT INTO films(title,content_type,description,poster_url,video_url,year,genre,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,true) RETURNING *`,[title,type,description,poster,video,Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null]);
-    await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type});res.json({...r.rows[0],id:Number(r.rows[0].id)});
+    const r=await q(`INSERT INTO films(title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,true) RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null]);
+    await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type});res.json({...r.rows[0],id:Number(r.rows[0].id),video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});
   }catch(e){console.error('create film',e);res.status(500).json({error:'ساخت محتوا ناموفق بود'})}
 });
 app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
   try{
-    const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,active=req.body.active!==false;
+    const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,active=req.body.active!==false;
     if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});
-    const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,video_url=$5,year=$6,genre=$7,duration_minutes=$8,active=$9,updated_at=now() WHERE id=$10 RETURNING *`,[title,type,description,poster,video,Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,active,id]);
-    if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active});res.json({...r.rows[0],id:Number(r.rows[0].id)});
+    const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,video_url=$5,video_sources=$6::jsonb,year=$7,genre=$8,duration_minutes=$9,active=$10,updated_at=now() WHERE id=$11 RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,active,id]);
+    if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active});res.json({...r.rows[0],id:Number(r.rows[0].id),video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});
   }catch(e){res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}
 });
 app.delete('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id);const r=await q('DELETE FROM films WHERE id=$1 RETURNING id',[id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'delete_film',id,{});res.json({ok:true})}catch(e){res.status(500).json({error:'حذف محتوا ناموفق بود'})}});
@@ -2197,6 +2197,7 @@ async function ensureFilmSchema(){
     description TEXT NOT NULL DEFAULT '',
     poster_url TEXT NOT NULL DEFAULT '',
     video_url TEXT NOT NULL DEFAULT '',
+    video_sources JSONB NOT NULL DEFAULT '[]'::jsonb,
     year INT,
     genre TEXT NOT NULL DEFAULT '',
     duration_minutes INT,
@@ -2204,6 +2205,7 @@ async function ensureFilmSchema(){
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await q(`ALTER TABLE films ADD COLUMN IF NOT EXISTS video_sources JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await q(`CREATE INDEX IF NOT EXISTS films_active_created_idx ON films(active,created_at DESC)`);
 }
 
