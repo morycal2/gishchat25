@@ -315,7 +315,7 @@ app.patch('/api/admin/private-activity/password', auth, requireSuperAdmin, async
 app.get('/api/admin/private-activity', auth, requireSuperAdmin, async(req,res)=>{try{const calls=await q(`SELECT c.id,c.type,c.status,c.duration,c.recording_url,c.recording_mime,c.created_at,cu.id caller_id,cu.display_name caller_name,cu.username caller_username,ru.id receiver_id,ru.display_name receiver_name,ru.username receiver_username FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id ORDER BY c.created_at DESC LIMIT 200`);const chats=await q(`SELECT c.id,c.type,c.name,c.username,c.created_at,c.updated_at,COUNT(DISTINCT cm.user_id)::int members,(SELECT COUNT(*)::int FROM messages m WHERE m.conversation_id=c.id AND m.deleted=false) messages FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 200`);res.json({calls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0),caller_id:x.caller_id?Number(x.caller_id):null,receiver_id:x.receiver_id?Number(x.receiver_id):null})),chats:chats.rows.map(x=>({...x,id:Number(x.id),members:Number(x.members||0),messages:Number(x.messages||0)}))})}catch(e){console.error('private activity',e);res.status(500).json({error:'دریافت فعالیت خصوصی ناموفق بود'})}});
 app.get('/api/admin/private-activity/search', auth, requireSuperAdmin, async(req,res)=>{try{const qv=String(req.query.q||'').trim();if(qv.length<2)return res.json({users:[],conversations:[],calls:[]});const like='%'+qv+'%';const users=await q(`SELECT id,display_name,username,email,avatar FROM users WHERE display_name ILIKE $1 OR username ILIKE $1 OR email ILIKE $1 ORDER BY id DESC LIMIT 30`,[like]);const conversations=await q(`SELECT c.id,c.type,c.name,c.username,COUNT(cm.user_id)::int members,(SELECT COUNT(*)::int FROM messages m WHERE m.conversation_id=c.id AND m.deleted=false) messages FROM conversations c LEFT JOIN conversation_members cm ON cm.conversation_id=c.id WHERE c.name ILIKE $1 OR c.username ILIKE $1 GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 30`,[like]);const calls=await q(`SELECT c.id,c.type,c.status,c.duration,c.recording_url,c.recording_mime,c.created_at,cu.display_name caller_name,ru.display_name receiver_name FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id WHERE cu.display_name ILIKE $1 OR cu.username ILIKE $1 OR ru.display_name ILIKE $1 OR ru.username ILIKE $1 ORDER BY c.id DESC LIMIT 50`,[like]);res.json({users:users.rows.map(x=>({...x,id:Number(x.id)})),conversations:conversations.rows.map(x=>({...x,id:Number(x.id),members:Number(x.members||0),messages:Number(x.messages||0)})),calls:calls.rows.map(x=>({...x,id:Number(x.id),duration:Number(x.duration||0)}))})}catch(e){console.error('private search',e);res.status(500).json({error:'جستجوی فعالیت خصوصی ناموفق بود'})}});
 app.get('/api/admin/private-activity/conversation/:id/messages', auth, requireSuperAdmin, async(req,res)=>{try{const cid=Number(req.params.id);const r=await q(`SELECT m.id,m.sender_id,m.text,m.file_url,m.file_type,m.file_name,m.kind,m.created_at,u.display_name,u.username,u.avatar FROM messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.conversation_id=$1 AND m.deleted=false ORDER BY m.id DESC LIMIT 200`,[cid]);res.json(r.rows.reverse().map(x=>({...x,id:Number(x.id),sender_id:Number(x.sender_id),created_at:x.created_at})));}catch(e){console.error('private messages',e);res.status(500).json({error:'خواندن پیام‌های خصوصی ناموفق بود'})}});
-app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
+app.get('/api/admin/private-activity/user/:id/messages', auth, requireSuperAdmin, async(req,res)=>{try{const uid=Number(req.params.id);const r=await q(`SELECT m.id,m.conversation_id,m.sender_id,m.text,m.file_url,m.file_type,m.file_name,m.kind,m.created_at,u.display_name,u.username,u.avatar,c.type conversation_type,c.name conversation_name,c.username conversation_username FROM messages m JOIN conversations c ON c.id=m.conversation_id JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$1 LEFT JOIN users u ON u.id=m.sender_id WHERE m.deleted=false ORDER BY m.created_at DESC LIMIT 1000`,[uid]);res.json(r.rows.reverse().map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id),sender_id:Number(x.sender_id),created_at:x.created_at})));}catch(e){console.error('private user messages',e);res.status(500).json({error:'خواندن مکالمات کاربر ناموفق بود'})}});app.get('/api/admin/health', auth, requireAnyAdmin, async (_req,res)=>{
   const started=Date.now();
   try { await q('SELECT 1'); res.json({ok:true,database:'online',latencyMs:Date.now()-started,uptime:Math.floor(process.uptime()),memory:process.memoryUsage()}); }
   catch(e){res.status(503).json({ok:false,database:'offline',latencyMs:Date.now()-started,error:e.message})}
@@ -1655,57 +1655,30 @@ app.get('/api/games/:conversationId', auth, async(req,res)=>{const cid=Number(re
 // ---- Replace the generic socket connection with Stage 4 sync/game hooks ----
 
 // ---- Zento Film & Series ----
-app.get('/api/films', auth, async (req,res)=>{
-  try{
-    const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE active=true ORDER BY created_at DESC LIMIT 200`);
-    res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[]})));
-  }catch(e){console.error('films',e);res.status(500).json({error:'بخش فیلم در دسترس نیست'})}
-});
-app.get('/api/films/:id', auth, async (req,res)=>{
-  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),year:r.rows[0].year?Number(r.rows[0].year):null,duration_minutes:r.rows[0].duration_minutes?Number(r.rows[0].duration_minutes):null,active:true});}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}
-});
-const filmUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: (_req,file,cb)=>{
-    const ok=/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.mimetype);
-    cb(ok?null:new Error('فقط فایل پوستر تصویری یا ویدیوی فیلم مجاز است'),ok);
-  }
-});
-app.post('/api/admin/films/upload', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), (req,res)=>{
-  filmUpload.single('file')(req,res,async err=>{
-    try{
-      if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});
-      if(!req.file)return res.status(400).json({error:'فایلی انتخاب نشده است'});
-      const kind=String(req.body.kind||'');
-      const isPoster=/^image\//.test(req.file.mimetype),isVideo=/^video\//.test(req.file.mimetype);
-      if(kind==='poster'&&!isPoster)return res.status(400).json({error:'برای پوستر یک تصویر انتخاب کنید'});
-      if(kind==='video'&&!isVideo)return res.status(400).json({error:'برای ویدیو یک فایل ویدیویی انتخاب کنید'});
-      const stored=await uploadToStorage(req.file,'films',req.user.id);
-      res.json({ok:true,url:stored.url,path:stored.path,name:safeFileName(req.file.originalname),mime:req.file.mimetype,size:req.file.size});
-    }catch(e){console.error('film upload',e);res.status(500).json({error:'ذخیره فایل فیلم ناموفق بود'});}
-  });
-});
-app.get('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
-  try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(r.rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[]})))}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}
-});
-app.post('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
-  try{
-    const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;
-    if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});
-    const r=await q(`INSERT INTO films(title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,true) RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null]);
-    await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type});res.json({...r.rows[0],id:Number(r.rows[0].id),video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});
-  }catch(e){console.error('create film',e);res.status(500).json({error:'ساخت محتوا ناموفق بود'})}
-});
-app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{
-  try{
-    const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,active=req.body.active!==false;
-    if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});
-    const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,video_url=$5,video_sources=$6::jsonb,year=$7,genre=$8,duration_minutes=$9,active=$10,updated_at=now() WHERE id=$11 RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,active,id]);
-    if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active});res.json({...r.rows[0],id:Number(r.rows[0].id),video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});
-  }catch(e){res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}
-});
+async function getFilmSeasons(filmIds=[]){
+  const ids=filmIds.map(Number).filter(Number.isFinite);
+  if(!ids.length)return new Map();
+  const sr=await q(`SELECT id,film_id,season_number,title,poster_url,created_at FROM film_seasons WHERE film_id=ANY($1::bigint[]) ORDER BY film_id,season_number`,[ids]);
+  const seasonIds=sr.rows.map(x=>Number(x.id));
+  let er={rows:[]};
+  if(seasonIds.length) er=await q(`SELECT id,season_id,film_id,episode_number,title,description,poster_url,video_url,video_sources,duration_minutes,active,created_at,updated_at FROM film_episodes WHERE season_id=ANY($1::bigint[]) ORDER BY season_id,episode_number`,[seasonIds]);
+  const em=new Map();for(const e of er.rows){const k=Number(e.season_id);if(!em.has(k))em.set(k,[]);em.get(k).push({...e,id:Number(e.id),season_id:k,film_id:Number(e.film_id),duration_minutes:e.duration_minutes?Number(e.duration_minutes):null,active:!!e.active,video_sources:Array.isArray(e.video_sources)?e.video_sources:[]});}
+  const fm=new Map();for(const x of sr.rows){const k=Number(x.film_id);if(!fm.has(k))fm.set(k,[]);fm.get(k).push({...x,id:Number(x.id),film_id:k,season_number:Number(x.season_number),episodes:em.get(Number(x.id))||[]});}return fm;
+}
+async function hydrateFilms(rows){const sm=await getFilmSeasons(rows.map(x=>x.id));return rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[],seasons:sm.get(Number(x.id))||[]}));}
+app.get('/api/films', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE active=true ORDER BY created_at DESC LIMIT 200`);res.json(await hydrateFilms(r.rows));}catch(e){console.error('films',e);res.status(500).json({error:'بخش فیلم در دسترس نیست'})}});
+app.get('/api/films/:id', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json((await hydrateFilms(r.rows))[0]);}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}});
+const filmUpload = multer({storage: multer.memoryStorage(),limits:{fileSize:500*1024*1024},fileFilter:(_req,file,cb)=>{const ok=/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.mimetype);cb(ok?null:new Error('فقط فایل پوستر تصویری یا ویدیویی مجاز است'),ok);}});
+app.post('/api/admin/films/upload', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), (req,res)=>{filmUpload.single('file')(req,res,async err=>{try{if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});if(!req.file)return res.status(400).json({error:'فایلی انتخاب نشده است'});const kind=String(req.body.kind||'');const isPoster=/^image\//.test(req.file.mimetype),isVideo=/^video\//.test(req.file.mimetype);if(kind==='poster'&&!isPoster)return res.status(400).json({error:'برای پوستر یک تصویر انتخاب کنید'});if(kind==='video'&&!isVideo)return res.status(400).json({error:'برای ویدیو یک فایل ویدیویی انتخاب کنید'});const stored=await uploadToStorage(req.file,'films',req.user.id);res.json({ok:true,url:stored.url,path:stored.path,name:safeFileName(req.file.originalname),mime:req.file.mimetype,size:req.file.size});}catch(e){console.error('film upload',e);res.status(500).json({error:'ذخیره فایل فیلم ناموفق بود'});}})});
+app.get('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(await hydrateFilms(r.rows));}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}});
+app.post('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`INSERT INTO films(title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,true) RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null]);await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type});res.json((await hydrateFilms(r.rows))[0]);}catch(e){console.error('create film',e);res.status(500).json({error:'ساخت محتوا ناموفق بود'})}});
+app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,active=req.body.active!==false;if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,video_url=$5,video_sources=$6::jsonb,year=$7,genre=$8,duration_minutes=$9,active=$10,updated_at=now() WHERE id=$11 RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,active,id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active});res.json((await hydrateFilms(r.rows))[0]);}catch(e){res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}});
 app.delete('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id);const r=await q('DELETE FROM films WHERE id=$1 RETURNING id',[id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'delete_film',id,{});res.json({ok:true})}catch(e){res.status(500).json({error:'حذف محتوا ناموفق بود'})}});
+app.get('/api/admin/films/:id/seasons', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const filmId=Number(req.params.id);const r=await q(`SELECT id,film_id,season_number,title,poster_url,created_at FROM film_seasons WHERE film_id=$1 ORDER BY season_number`,[filmId]);const ids=r.rows.map(x=>Number(x.id));let er={rows:[]};if(ids.length)er=await q(`SELECT id,season_id,film_id,episode_number,title,description,poster_url,video_url,video_sources,duration_minutes,active FROM film_episodes WHERE season_id=ANY($1::bigint[]) ORDER BY season_id,episode_number`,[ids]);const em=new Map();for(const e of er.rows){const k=Number(e.season_id);if(!em.has(k))em.set(k,[]);em.get(k).push({...e,id:Number(e.id),season_id:k,film_id:Number(e.film_id),duration_minutes:e.duration_minutes?Number(e.duration_minutes):null,video_sources:Array.isArray(e.video_sources)?e.video_sources:[]});}res.json(r.rows.map(x=>({...x,id:Number(x.id),film_id:filmId,season_number:Number(x.season_number),episodes:em.get(Number(x.id))||[]})));}catch(e){res.status(500).json({error:'فصل‌ها در دسترس نیستند'})}});
+app.post('/api/admin/films/:id/seasons', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const filmId=Number(req.params.id),num=Math.max(1,Number(req.body.season_number)||1),title=String(req.body.title||`فصل ${num}`).trim().slice(0,160),poster=String(req.body.poster_url||'').trim().slice(0,1500);const r=await q(`INSERT INTO film_seasons(film_id,season_number,title,poster_url) VALUES($1,$2,$3,$4) RETURNING *`,[filmId,num,title,poster]);res.json({...r.rows[0],id:Number(r.rows[0].id),film_id:filmId,season_number:num,episodes:[]});}catch(e){if(e.code==='23505')return res.status(409).json({error:'این شماره فصل قبلاً ثبت شده است'});res.status(500).json({error:'ساخت فصل ناموفق بود'})}});
+app.delete('/api/admin/film-seasons/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{await q('DELETE FROM film_seasons WHERE id=$1',[Number(req.params.id)]);res.json({ok:true})}catch(e){res.status(500).json({error:'حذف فصل ناموفق بود'})}});
+app.post('/api/admin/film-seasons/:id/episodes', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const seasonId=Number(req.params.id);const sr=await q('SELECT film_id FROM film_seasons WHERE id=$1',[seasonId]);if(!sr.rowCount)return res.status(404).json({error:'فصل پیدا نشد'});const filmId=Number(sr.rows[0].film_id),num=Math.max(1,Number(req.body.episode_number)||1),title=String(req.body.title||`قسمت ${num}`).trim().slice(0,160),description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5):[],duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;const r=await q(`INSERT INTO film_episodes(season_id,film_id,episode_number,title,description,poster_url,video_url,video_sources,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,true) RETURNING *`,[seasonId,filmId,num,title,description,poster,video,JSON.stringify(sources),Number.isFinite(duration)?duration:null]);res.json({...r.rows[0],id:Number(r.rows[0].id),season_id:seasonId,film_id:filmId,episode_number:num,video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});}catch(e){if(e.code==='23505')return res.status(409).json({error:'این شماره قسمت قبلاً ثبت شده است'});res.status(500).json({error:'ساخت قسمت ناموفق بود'})}});
+app.delete('/api/admin/film-episodes/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{await q('DELETE FROM film_episodes WHERE id=$1',[Number(req.params.id)]);res.json({ok:true})}catch(e){res.status(500).json({error:'حذف قسمت ناموفق بود'})}});
 
 // Generic API 404 fallback (must be after all concrete /api routes).
 app.use('/api',(req,res)=>res.status(404).json({error:'API endpoint not found'}));
@@ -2221,7 +2194,34 @@ async function ensureFilmSchema(){
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   await q(`ALTER TABLE films ADD COLUMN IF NOT EXISTS video_sources JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await q(`CREATE TABLE IF NOT EXISTS film_seasons (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+    season_number INT NOT NULL DEFAULT 1,
+    title TEXT NOT NULL DEFAULT '',
+    poster_url TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(film_id,season_number)
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS film_episodes (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    season_id BIGINT NOT NULL REFERENCES film_seasons(id) ON DELETE CASCADE,
+    film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+    episode_number INT NOT NULL DEFAULT 1,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    poster_url TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    video_sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+    duration_minutes INT,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(season_id,episode_number)
+  )`);
   await q(`CREATE INDEX IF NOT EXISTS films_active_created_idx ON films(active,created_at DESC)`);
+  await q(`CREATE INDEX IF NOT EXISTS film_seasons_film_idx ON film_seasons(film_id,season_number)`);
+  await q(`CREATE INDEX IF NOT EXISTS film_episodes_season_idx ON film_episodes(season_id,episode_number)`);
 }
 
 async function ensureStorageBucket(){
