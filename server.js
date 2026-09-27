@@ -163,11 +163,12 @@ async function messageView(row) {
   return { ...row, id: Number(row.id), conversation_id: Number(row.conversation_id), sender_id: Number(row.sender_id), bot_id: row.bot_id?Number(row.bot_id):null, bot_name, bot_username,
     reply_to: row.reply_to ? Number(row.reply_to) : null, reactions: row.reactions || {}, display_name, username, avatar, verified: !!u?.verified, bot_verified };
 }
-function tokenFor(u) { return jwt.sign({ id: Number(u.id) }, JWT_SECRET, { expiresIn: '7d' }); }
+async function tokenFor(u, meta={}) { const sid=crypto.randomUUID(); const token=jwt.sign({ id:Number(u.id), sid }, JWT_SECRET, { expiresIn:'7d' }); try { await q(`INSERT INTO user_sessions(id,user_id,token_hash,label,user_agent,ip_address) VALUES($1,$2,$3,$4,$5,$6)`,[sid,Number(u.id),crypto.createHash('sha256').update(token).digest('hex'),String(meta.label||'دستگاه جدید').slice(0,80),String(meta.userAgent||'').slice(0,500),String(meta.ip||'').slice(0,100)]); } catch(e){ console.warn('session create',e.message); } return token; }
 async function auth(req, res, next) {
   try {
     const raw = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const d = jwt.verify(raw, JWT_SECRET);
+    if(d.sid){ const sr=await q('SELECT revoked_at FROM user_sessions WHERE id=$1 AND user_id=$2',[String(d.sid),Number(d.id)]); if(!sr.rowCount || sr.rows[0].revoked_at) throw new Error('session-revoked'); await q('UPDATE user_sessions SET last_seen_at=now() WHERE id=$1',[String(d.sid)]); }
     if (d.role === 'superadmin') {
       const sp = await getSuperAdminProfile(); req.user = { id: 0, username: 'superadmin', email: sp?.email || SUPERADMIN_EMAIL, display_name: sp?.display_name || 'مدیر کل زنتو', avatar: sp?.avatar || '', bio: sp?.bio || '', is_bot: false, role: 'superadmin' };
       return next();
@@ -226,7 +227,7 @@ app.post('/api/register', async (req, res) => {
     const r = await q(`INSERT INTO users(username,email,password_hash,display_name) VALUES($1,$2,$3,$4)
       RETURNING id,username,email,display_name,avatar,bio`, [username, email, hash, displayName]);
     const u = r.rows[0];
-    res.json({ token: tokenFor(u), user: safeUser(u) });
+    res.json({ token: await tokenFor(u,{label:req.body.deviceName||'دستگاه جدید',userAgent:req.get('user-agent'),ip:req.ip}), user: safeUser(u) });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ثبت‌نام ناموفق بود' }); }
 });
 
@@ -254,7 +255,7 @@ app.post('/api/login', async (req, res) => {
     u.last_seen_at=new Date().toISOString();
     const controls=await getSiteControls();
     if(controls.global_enabled===false)return res.status(503).json({error:'⛔ زنتو موقتاً غیرفعال است. لطفاً بعداً دوباره تلاش کنید.'});
-    res.json({ token: tokenFor(u), user: {...safeUser(u), ban_until:u.ban_until||null, ban_reason:u.ban_reason||null} });
+    res.json({ token: await tokenFor(u,{label:req.body.deviceName||'دستگاه جدید',userAgent:req.get('user-agent'),ip:req.ip}), user: {...safeUser(u), ban_until:u.ban_until||null, ban_reason:u.ban_reason||null} });
   } catch (e) { console.error(e); res.status(500).json({ error: 'ورود ناموفق بود' }); }
 });
 async function adminQuery(sql, params=[], fallbackRows=[]) {
@@ -666,6 +667,15 @@ async function canMessage(cid, uid) {
   return { ok: true, conversation: c };
 }
 
+async function enforceConversationRules(cid,uid,text=''){
+  try{const r=await q('SELECT rules FROM conversation_rules WHERE conversation_id=$1',[cid]);const rules=r.rows[0]?.rules||{};const t=String(text||'');
+    if(rules.antiLink && /(?:https?:\/\/|www\.|t\.me\/|discord\.gg\/)/i.test(t)) return {ok:false,error:'🛡️ ارسال لینک در این گفتگو محدود شده است'};
+    if(rules.antiSpam){const x=await q(`SELECT count(*)::int n FROM messages WHERE conversation_id=$1 AND sender_id=$2 AND created_at>now()-interval '20 seconds'`,[cid,uid]);if(Number(x.rows[0]?.n||0)>=8)return {ok:false,error:'🛡️ به‌دلیل ضداسپم، کمی صبر کنید'};}
+    const slow=Math.max(0,Number(rules.slowMode||0));if(slow){const x=await q(`SELECT created_at FROM messages WHERE conversation_id=$1 AND sender_id=$2 ORDER BY id DESC LIMIT 1`,[cid,uid]);if(x.rowCount && Date.now()-new Date(x.rows[0].created_at).getTime()<slow*1000)return {ok:false,error:`⏳ حالت Slow Mode فعال است؛ ${slow} ثانیه فاصله لازم است`};}
+    return {ok:true};
+  }catch{return {ok:true}}
+}
+
 async function insertMessage({ cid, uid, text, kind='text', fileUrl='', fileType='', fileName='', replyTo=null, profileId=null, expiresIn=null, quoteIds=[], botId=null, replyMarkup=null }) {
   const expiresAt = expiresIn ? new Date(Date.now()+Number(expiresIn)*1000) : null;
   const r = await q(`INSERT INTO messages(conversation_id,sender_id,text,file_url,file_type,file_name,kind,reply_to,profile_id,expires_at,quote_ids,bot_id,reply_markup)
@@ -775,6 +785,7 @@ app.post('/api/messages', auth, (req,res,next)=>requireFeature('messages',req,re
     const cid = Number(req.body.conversationId); const check = await canMessage(cid, req.user.id);
     if (!check.ok) return res.status(403).json({ error: check.error });
     const text = String(req.body.text || '').trim().slice(0, 5000);
+    const rulesCheck=await enforceConversationRules(cid,req.user.id,text); if(!rulesCheck.ok)return res.status(429).json({error:rulesCheck.error});
     const replyTo = req.body.replyTo ? Number(req.body.replyTo) : null;
     const fileUrl=String(req.body.fileUrl||'').slice(0,1000), fileType=String(req.body.fileType||'').slice(0,120), fileName=safeFileName(req.body.fileName||''), kind=String(req.body.kind||'text').slice(0,40);
     const profileId=req.body.profileId?Number(req.body.profileId):null;
@@ -2177,6 +2188,71 @@ async function logAdmin(adminId,action,targetId,details={}){try{await q('INSERT 
 async function isSiteAdmin(userId, permission){try{const r=await q('SELECT permissions,active FROM site_admins WHERE user_id=$1',[Number(userId)]);if(!r.rowCount||!r.rows[0].active)return false;const p=r.rows[0].permissions||{};return p[permission]===true || p.all===true}catch{return false}}
 
 
+
+
+// ===== ZENTO PROFESSIONAL PACK v4.32 =====
+async function ensureProfessionalSchema(){
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`);
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ`);
+  await q(`CREATE INDEX IF NOT EXISTS messages_scheduled_idx ON messages(scheduled_at) WHERE scheduled_at IS NOT NULL AND deleted=false`);
+  await q(`CREATE TABLE IF NOT EXISTS user_sessions(id UUID PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,label TEXT NOT NULL DEFAULT 'دستگاه',user_agent TEXT NOT NULL DEFAULT '',ip_address TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),revoked_at TIMESTAMPTZ)`);
+  await q(`CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions(user_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS user_security(user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,two_factor_enabled BOOLEAN NOT NULL DEFAULT false,totp_secret TEXT NOT NULL DEFAULT '',recovery_codes JSONB NOT NULL DEFAULT '[]'::jsonb,updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS message_pins(conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,pinned_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,pinned_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(conversation_id,message_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS polls(id BIGSERIAL PRIMARY KEY,message_id BIGINT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,question TEXT NOT NULL,options JSONB NOT NULL DEFAULT '[]'::jsonb,multiple BOOLEAN NOT NULL DEFAULT false,anonymous BOOLEAN NOT NULL DEFAULT false,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS poll_votes(poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,option_indexes JSONB NOT NULL DEFAULT '[]'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(poll_id,user_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS message_drafts(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,text TEXT NOT NULL DEFAULT '',updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(user_id,conversation_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS scheduled_messages(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,text TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL DEFAULT 'text',file_url TEXT NOT NULL DEFAULT '',file_type TEXT NOT NULL DEFAULT '',file_name TEXT NOT NULL DEFAULT '',reply_to BIGINT,schedule_at TIMESTAMPTZ NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE INDEX IF NOT EXISTS scheduled_messages_due_idx ON scheduled_messages(status,schedule_at)`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_invites(id BIGSERIAL PRIMARY KEY,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,code TEXT NOT NULL UNIQUE,created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,max_uses INT,uses INT NOT NULL DEFAULT 0,expires_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),active BOOLEAN NOT NULL DEFAULT true)`);
+  await q(`CREATE INDEX IF NOT EXISTS conversation_invites_conv_idx ON conversation_invites(conversation_id,active)`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_mutes(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,muted_until TIMESTAMPTZ,PRIMARY KEY(user_id,conversation_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS favorite_contacts(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,contact_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(user_id,contact_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_rules(conversation_id BIGINT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,rules JSONB NOT NULL DEFAULT '{}'::jsonb,updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS message_threads(message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS admin_action_logs(id BIGSERIAL PRIMARY KEY,conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,admin_id BIGINT REFERENCES users(id) ON DELETE SET NULL,action TEXT NOT NULL,details JSONB NOT NULL DEFAULT '{}'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+}
+function professionalToken(){return crypto.randomBytes(18).toString('base64url').replace(/[^a-zA-Z0-9_-]/g,'')}
+function base32Secret(){const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let out='';for(let i=0;i<32;i++)out+=chars[crypto.randomInt(chars.length)];return out}
+function totp(secret,step=Math.floor(Date.now()/30000)){try{const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits='';for(const c of secret)bits+=chars.indexOf(c).toString(2).padStart(5,'0');const buf=Buffer.alloc(Math.floor(bits.length/8));for(let i=0;i<buf.length;i++)buf[i]=parseInt(bits.slice(i*8,i*8+8),2);const h=crypto.createHmac('sha1',buf).update(Buffer.from(BigInt(step).toString(16).padStart(16,'0'),'hex')).digest();const o=h[h.length-1]&15;return String(((h.readUInt32BE(o)&0x7fffffff)%1000000)).padStart(6,'0')}catch{return ''}}
+function verifyTotp(secret,code){for(let d=-1;d<=1;d++)if(totp(secret,Math.floor(Date.now()/30000)+d)===String(code||''))return true;return false}
+
+app.patch('/api/messages/:id',auth,requireNotBanned,async(req,res)=>{try{const id=Number(req.params.id);const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[id])).rows[0];if(!m)return res.status(404).json({error:'پیام پیدا نشد'});if(Number(m.sender_id)!==Number(req.user.id))return res.status(403).json({error:'فقط فرستنده می‌تواند پیام را ویرایش کند'});if(Date.now()-new Date(m.created_at).getTime()>48*3600e3)return res.status(400).json({error:'مهلت ویرایش این پیام تمام شده است'});const text=String(req.body.text||'').trim().slice(0,5000);if(!text&&!m.file_url)return res.status(400).json({error:'متن خالی است'});const r=await q('UPDATE messages SET text=$1,edited_at=now() WHERE id=$2 RETURNING *',[text,id]);const out=await messageView(r.rows[0]);io.to('conv:'+m.conversation_id).emit('message_edited',out);res.json(out)}catch(e){res.status(500).json({error:'ویرایش پیام ناموفق بود'})}});
+app.post('/api/messages/:id/pin',auth,async(req,res)=>{try{const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});await q(`INSERT INTO message_pins(conversation_id,message_id,pinned_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,[m.conversation_id,m.id,req.user.id]);await q('UPDATE messages SET pinned_at=now() WHERE id=$1',[m.id]);await q('INSERT INTO admin_action_logs(conversation_id,admin_id,action,details) VALUES($1,$2,$3,$4)',[m.conversation_id,req.user.id,'pin_message',JSON.stringify({messageId:m.id})]);io.to('conv:'+m.conversation_id).emit('message_pinned',{messageId:Number(m.id)});res.json({ok:true})}catch(e){res.status(500).json({error:'پین پیام ناموفق بود'})}});
+app.delete('/api/messages/:id/pin',auth,async(req,res)=>{const m=(await q('SELECT conversation_id FROM messages WHERE id=$1',[Number(req.params.id)])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});await q('DELETE FROM message_pins WHERE conversation_id=$1 AND message_id=$2',[m.conversation_id,Number(req.params.id)]);await q('UPDATE messages SET pinned_at=NULL WHERE id=$1',[Number(req.params.id)]);io.to('conv:'+m.conversation_id).emit('message_unpinned',{messageId:Number(req.params.id)});res.json({ok:true})});
+app.get('/api/conversations/:id/pins',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT p.*,m.text,m.sender_id,m.created_at,u.display_name,u.username FROM message_pins p JOIN messages m ON m.id=p.message_id JOIN users u ON u.id=m.sender_id WHERE p.conversation_id=$1 ORDER BY p.pinned_at DESC LIMIT 100`,[cid]);res.json(r.rows.map(x=>({...x,id:Number(x.id),message_id:Number(x.message_id),sender_id:Number(x.sender_id)})))});
+app.post('/api/conversations/:id/poll',auth,requireNotBanned,async(req,res)=>{try{const cid=Number(req.params.id);const ck=await canMessage(cid,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const question=String(req.body.question||'').trim().slice(0,500);const options=(Array.isArray(req.body.options)?req.body.options:[]).map(x=>String(x).trim().slice(0,120)).filter(Boolean).slice(0,10);if(!question||options.length<2)return res.status(400).json({error:'سؤال و حداقل دو گزینه لازم است'});const m=await insertMessage({cid,uid:req.user.id,text:'📊 '+question,kind:'poll'});await q('INSERT INTO polls(message_id,question,options,multiple,anonymous) VALUES($1,$2,$3,$4,$5)',[m.id,question,JSON.stringify(options),!!req.body.multiple,!!req.body.anonymous]);io.to('conv:'+cid).emit('message',m);res.json(m)}catch(e){res.status(500).json({error:'ساخت نظرسنجی ناموفق بود'})}});
+app.post('/api/polls/:id/vote',auth,async(req,res)=>{try{const pid=Number(req.params.id);const p=(await q('SELECT * FROM polls WHERE id=$1',[pid])).rows[0];if(!p)return res.status(404).json({error:'نظرسنجی پیدا نشد'});const indexes=(Array.isArray(req.body.options)?req.body.options:[Number(req.body.option)]).map(Number).filter(Number.isInteger);const opts=Array.isArray(p.options)?p.options:[];if(!indexes.length||indexes.some(i=>i<0||i>=opts.length))return res.status(400).json({error:'گزینه نامعتبر است'});if(!p.multiple&&indexes.length>1)return res.status(400).json({error:'فقط یک گزینه مجاز است'});await q(`INSERT INTO poll_votes(poll_id,user_id,option_indexes) VALUES($1,$2,$3) ON CONFLICT(poll_id,user_id) DO UPDATE SET option_indexes=EXCLUDED.option_indexes,created_at=now()`,[pid,req.user.id,JSON.stringify([...new Set(indexes)])]);res.json({ok:true})}catch(e){res.status(500).json({error:'ثبت رأی ناموفق بود'})}});
+app.get('/api/messages/:id/poll',auth,async(req,res)=>{const r=await q('SELECT p.* FROM polls p JOIN messages m ON m.id=p.message_id WHERE p.message_id=$1',[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'نظرسنجی پیدا نشد'});const p=r.rows[0];const v=await q('SELECT option_indexes,count(*)::int n FROM poll_votes WHERE poll_id=$1 GROUP BY option_indexes',[p.id]);res.json({...p,id:Number(p.id),message_id:Number(p.message_id),votes:v.rows})});
+app.get('/api/polls/:id',auth,async(req,res)=>{const p=(await q('SELECT * FROM polls WHERE id=$1',[Number(req.params.id)])).rows[0];if(!p)return res.status(404).json({error:'نظرسنجی پیدا نشد'});const v=await q('SELECT option_indexes,count(*)::int n FROM poll_votes WHERE poll_id=$1 GROUP BY option_indexes',[p.id]);res.json({...p,id:Number(p.id),votes:v.rows})});
+app.put('/api/drafts/:conversationId',auth,async(req,res)=>{const cid=Number(req.params.conversationId);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const text=String(req.body.text||'').slice(0,10000);await q(`INSERT INTO message_drafts(user_id,conversation_id,text) VALUES($1,$2,$3) ON CONFLICT(user_id,conversation_id) DO UPDATE SET text=EXCLUDED.text,updated_at=now()`,[req.user.id,cid,text]);res.json({ok:true,text})});
+app.get('/api/drafts',auth,async(req,res)=>{const r=await q('SELECT conversation_id,text,updated_at FROM message_drafts WHERE user_id=$1 ORDER BY updated_at DESC',[req.user.id]);res.json(r.rows.map(x=>({...x,conversation_id:Number(x.conversation_id)})))});
+app.delete('/api/drafts/:conversationId',auth,async(req,res)=>{await q('DELETE FROM message_drafts WHERE user_id=$1 AND conversation_id=$2',[req.user.id,Number(req.params.conversationId)]);res.json({ok:true})});
+app.post('/api/conversations/:id/schedule',auth,requireNotBanned,async(req,res)=>{const cid=Number(req.params.id);const ck=await canMessage(cid,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const at=new Date(req.body.scheduleAt);if(Number.isNaN(at.getTime())||at.getTime()<Date.now()+15000)return res.status(400).json({error:'زمان ارسال باید حداقل ۱۵ ثانیه آینده باشد'});const r=await q(`INSERT INTO scheduled_messages(user_id,conversation_id,text,kind,file_url,file_type,file_name,reply_to,schedule_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[req.user.id,cid,String(req.body.text||'').slice(0,5000),String(req.body.kind||'text').slice(0,40),String(req.body.fileUrl||''),String(req.body.fileType||''),safeFileName(req.body.fileName||''),req.body.replyTo?Number(req.body.replyTo):null,at]);res.json({...r.rows[0],id:Number(r.rows[0].id)})});
+app.get('/api/scheduled',auth,async(req,res)=>{const r=await q(`SELECT * FROM scheduled_messages WHERE user_id=$1 AND status='pending' ORDER BY schedule_at`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id)})))});
+app.delete('/api/scheduled/:id',auth,async(req,res)=>{await q(`UPDATE scheduled_messages SET status='cancelled' WHERE id=$1 AND user_id=$2`,[Number(req.params.id),req.user.id]);res.json({ok:true})});
+app.post('/api/conversations/:id/invites',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'عضو نیستید'});const code=professionalToken();const max=req.body.maxUses?Math.max(1,Number(req.body.maxUses)):null;const exp=req.body.expiresAt?new Date(req.body.expiresAt):null;const r=await q(`INSERT INTO conversation_invites(conversation_id,code,created_by,max_uses,expires_at) VALUES($1,$2,$3,$4,$5) RETURNING *`,[cid,code,req.user.id,max,exp]);res.json({id:Number(r.rows[0].id),code,url:`${req.protocol}://${req.get('host')}/#/join/${code}`,expires_at:r.rows[0].expires_at,max_uses:max})});
+app.get('/api/invites/:code',async(req,res)=>{const r=await q(`SELECT i.*,c.name,c.type,c.photo,c.username FROM conversation_invites i JOIN conversations c ON c.id=i.conversation_id WHERE i.code=$1 AND i.active=true`,[String(req.params.code)]);if(!r.rowCount)return res.status(404).json({error:'لینک دعوت نامعتبر است'});const x=r.rows[0];if(x.expires_at&&new Date(x.expires_at)<new Date())return res.status(410).json({error:'لینک منقضی شده است'});if(x.max_uses&&x.uses>=x.max_uses)return res.status(410).json({error:'ظرفیت لینک تکمیل شده است'});res.json({...x,id:Number(x.id),conversation_id:Number(x.conversation_id)})});
+app.post('/api/invites/:code/join',auth,async(req,res)=>{const r=(await q(`SELECT * FROM conversation_invites WHERE code=$1 AND active=true`,[String(req.params.code)])).rows[0];if(!r)return res.status(404).json({error:'لینک دعوت نامعتبر است'});if(r.expires_at&&new Date(r.expires_at)<new Date())return res.status(410).json({error:'لینک منقضی شده است'});if(r.max_uses&&r.uses>=r.max_uses)return res.status(410).json({error:'ظرفیت تکمیل شده است'});await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[r.conversation_id,req.user.id]);await q('UPDATE conversation_invites SET uses=uses+1 WHERE id=$1',[r.id]);res.json({ok:true,conversationId:Number(r.conversation_id)})});
+app.put('/api/conversations/:id/mute',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const until=req.body.until?new Date(req.body.until):null;await q(`INSERT INTO conversation_mutes(user_id,conversation_id,muted_until) VALUES($1,$2,$3) ON CONFLICT(user_id,conversation_id) DO UPDATE SET muted_until=EXCLUDED.muted_until`,[req.user.id,cid,until]);res.json({ok:true,muted_until:until})});
+app.delete('/api/conversations/:id/mute',auth,async(req,res)=>{await q('DELETE FROM conversation_mutes WHERE user_id=$1 AND conversation_id=$2',[req.user.id,Number(req.params.id)]);res.json({ok:true})});
+app.get('/api/favorites',auth,async(req,res)=>{const r=await q(`SELECT u.id,u.username,u.display_name,u.avatar,u.verified FROM favorite_contacts f JOIN users u ON u.id=f.contact_id WHERE f.user_id=$1 ORDER BY f.created_at DESC`,[req.user.id]);res.json(r.rows.map(safeUser))});
+app.post('/api/favorites/:userId',auth,async(req,res)=>{await q('INSERT INTO favorite_contacts(user_id,contact_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.user.id,Number(req.params.userId)]);res.json({ok:true})});
+app.delete('/api/favorites/:userId',auth,async(req,res)=>{await q('DELETE FROM favorite_contacts WHERE user_id=$1 AND contact_id=$2',[req.user.id,Number(req.params.userId)]);res.json({ok:true})});
+app.get('/api/conversations/:id/rules',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q('SELECT rules FROM conversation_rules WHERE conversation_id=$1',[cid]);res.json(r.rows[0]?.rules||{})});
+app.put('/api/conversations/:id/rules',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const rules=req.body&&typeof req.body==='object'?req.body:{};await q(`INSERT INTO conversation_rules(conversation_id,rules) VALUES($1,$2) ON CONFLICT(conversation_id) DO UPDATE SET rules=EXCLUDED.rules,updated_at=now()`,[cid,JSON.stringify(rules)]);res.json(rules)});
+app.get('/api/conversations/:id/admin-log',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT l.*,u.display_name,u.username FROM admin_action_logs l LEFT JOIN users u ON u.id=l.admin_id WHERE l.conversation_id=$1 ORDER BY l.created_at DESC LIMIT 200`,[cid]);res.json(r.rows.map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id)})))});
+app.get('/api/security/2fa',auth,async(req,res)=>{const r=await q('SELECT two_factor_enabled FROM user_security WHERE user_id=$1',[req.user.id]);res.json({enabled:!!r.rows[0]?.two_factor_enabled})});
+app.post('/api/security/2fa/setup',auth,async(req,res)=>{const secret=base32Secret();const recovery=Array.from({length:8},()=>crypto.randomBytes(5).toString('hex'));await q(`INSERT INTO user_security(user_id,two_factor_enabled,totp_secret,recovery_codes) VALUES($1,false,$2,$3) ON CONFLICT(user_id) DO UPDATE SET totp_secret=EXCLUDED.totp_secret,recovery_codes=EXCLUDED.recovery_codes,updated_at=now()`,[req.user.id,secret,JSON.stringify(recovery)]);const label=encodeURIComponent(`Zento:${req.user.email||req.user.username}`);res.json({secret,recovery,otpauth:`otpauth://totp/${label}?secret=${secret}&issuer=Zento`})});
+app.post('/api/security/2fa/enable',auth,async(req,res)=>{const r=(await q('SELECT totp_secret FROM user_security WHERE user_id=$1',[req.user.id])).rows[0];if(!r?.totp_secret||!verifyTotp(r.totp_secret,req.body.code))return res.status(400).json({error:'کد تاییدکننده نادرست است'});await q('UPDATE user_security SET two_factor_enabled=true,updated_at=now() WHERE user_id=$1',[req.user.id]);res.json({ok:true})});
+app.post('/api/security/2fa/disable',auth,async(req,res)=>{const r=(await q('SELECT totp_secret FROM user_security WHERE user_id=$1',[req.user.id])).rows[0];if(!r?.totp_secret||!verifyTotp(r.totp_secret,req.body.code))return res.status(400).json({error:'کد نادرست است'});await q('UPDATE user_security SET two_factor_enabled=false,updated_at=now() WHERE user_id=$1',[req.user.id]);res.json({ok:true})});
+app.get('/api/security/sessions',auth,async(req,res)=>{const r=await q(`SELECT id,label,user_agent,ip_address,created_at,last_seen_at,revoked_at FROM user_sessions WHERE user_id=$1 ORDER BY created_at DESC`,[req.user.id]);res.json(r.rows)});
+app.delete('/api/security/sessions/:id',auth,async(req,res)=>{await q('UPDATE user_sessions SET revoked_at=now() WHERE id=$1 AND user_id=$2',[String(req.params.id),req.user.id]);res.json({ok:true})});
+app.delete('/api/security/sessions',auth,async(req,res)=>{await q('UPDATE user_sessions SET revoked_at=now() WHERE user_id=$1',[req.user.id]);res.json({ok:true})});
+
+async function processScheduledMessages(){try{const r=await q(`SELECT * FROM scheduled_messages WHERE status='pending' AND schedule_at<=now() ORDER BY schedule_at LIMIT 50`);for(const x of r.rows){try{const out=await insertMessage({cid:Number(x.conversation_id),uid:Number(x.user_id),text:x.text,kind:x.kind,fileUrl:x.file_url,fileType:x.file_type,fileName:x.file_name,replyTo:x.reply_to?Number(x.reply_to):null});await q('UPDATE scheduled_messages SET status=\'sent\' WHERE id=$1',[x.id]);io.to('conv:'+x.conversation_id).emit('message',out)}catch(e){await q('UPDATE scheduled_messages SET status=\'failed\' WHERE id=$1',[x.id]);console.error('scheduled',e.message)}}}catch(e){console.error('scheduled worker',e.message)}}
+
 async function ensureFilmSchema(){
   await q(`CREATE TABLE IF NOT EXISTS films (
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -2235,6 +2311,7 @@ async function ensureStorageBucket(){
   }
 }
 
+setInterval(processScheduledMessages,5000);
 setInterval(async()=>{try{const r=await q(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at<=now() RETURNING id,conversation_id`);for(const x of r.rows)io.to('conv:'+x.conversation_id).emit('message_deleted',Number(x.id));}catch(e){console.error('expiry cleanup',e.message)}},5000);
 
 async function start(){
@@ -2249,6 +2326,7 @@ async function start(){
   await ensureBotFather();
   await ensureStage5Schema();
   await ensureFilmSchema();
+  await ensureProfessionalSchema();
   await ensureAdminSchema();
   await ensureStorageBucket();
   server.listen(PORT,()=>console.log(`Zento PostgreSQL backend listening on port ${PORT}`));
