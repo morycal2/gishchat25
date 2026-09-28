@@ -1677,19 +1677,121 @@ async function getFilmSeasons(filmIds=[]){
   const fm=new Map();for(const x of sr.rows){const k=Number(x.film_id);if(!fm.has(k))fm.set(k,[]);fm.get(k).push({...x,id:Number(x.id),film_id:k,season_number:Number(x.season_number),episodes:em.get(Number(x.id))||[]});}return fm;
 }
 async function hydrateFilms(rows){const sm=await getFilmSeasons(rows.map(x=>x.id));return rows.map(x=>({...x,id:Number(x.id),year:x.year?Number(x.year):null,duration_minutes:x.duration_minutes?Number(x.duration_minutes):null,active:!!x.active,video_sources:Array.isArray(x.video_sources)?x.video_sources:[],seasons:sm.get(Number(x.id))||[]}));}
-app.get('/api/films', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE active=true ORDER BY created_at DESC LIMIT 200`);res.json(await hydrateFilms(r.rows));}catch(e){console.error('films',e);res.status(500).json({error:'بخش فیلم در دسترس نیست'})}});
-app.get('/api/films/:id', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films WHERE id=$1 AND active=true`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json((await hydrateFilms(r.rows))[0]);}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}});
+app.get('/api/films', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,backdrop_url,trailer_url,video_url,video_sources,year,genre,duration_minutes,age_rating,country,cast_json,tags_json,subtitles_json,audio_tracks_json,featured,scheduled_at,status,active,created_at,updated_at FROM films WHERE active=true AND (scheduled_at IS NULL OR scheduled_at<=now()) AND status<>'draft' ORDER BY featured DESC,created_at DESC LIMIT 300`);res.json(await hydrateFilms(r.rows));}catch(e){console.error('films',e);res.status(500).json({error:'بخش فیلم در دسترس نیست'})}});
+app.get('/api/films/:id', auth, async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,backdrop_url,trailer_url,video_url,video_sources,year,genre,duration_minutes,age_rating,country,cast_json,tags_json,subtitles_json,audio_tracks_json,featured,scheduled_at,status,active,created_at,updated_at FROM films WHERE id=$1 AND active=true AND (scheduled_at IS NULL OR scheduled_at<=now()) AND status<>'draft'`,[Number(req.params.id)]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});res.json((await hydrateFilms(r.rows))[0]);}catch(e){res.status(500).json({error:'محتوا در دسترس نیست'})}});
+app.get('/api/admin/analytics',auth,requireAnyAdmin,async(req,res)=>{try{const [u,m,c,v,f]=await Promise.all([q(`SELECT COUNT(*)::int n FROM users`),q(`SELECT COUNT(*)::int n FROM messages WHERE deleted=false`),q(`SELECT COUNT(*)::int n FROM conversations`),q(`SELECT COUNT(*)::int n FROM film_views`),q(`SELECT COUNT(*)::int n FROM films`)]);const daily=await q(`SELECT to_char(day,'YYYY-MM-DD') day,(SELECT COUNT(*) FROM users u WHERE u.created_at>=day AND u.created_at<day+interval '1 day')::int users,(SELECT COUNT(*) FROM messages m WHERE m.created_at>=day AND m.created_at<day+interval '1 day' AND m.deleted=false)::int messages,(SELECT COUNT(*) FROM film_views fv WHERE fv.started_at>=day AND fv.started_at<day+interval '1 day')::int film_views FROM generate_series(current_date-6,current_date,interval '1 day') day ORDER BY day`);res.json({users:Number(u.rows[0].n),messages:Number(m.rows[0].n),conversations:Number(c.rows[0].n),filmViews:Number(v.rows[0].n),films:Number(f.rows[0].n),daily:daily.rows})}catch(e){res.status(500).json({error:'آمار مدیریت در دسترس نیست'})}});
+app.get('/api/admin/films/analytics',auth,(req,res,next)=>requireAdminPermission('films',req,res,next),async(req,res)=>{try{const [top,views]=await Promise.all([q(`SELECT f.id,f.title,f.content_type,COUNT(v.id)::int views,COALESCE(SUM(v.watched_seconds),0)::float watched_seconds,COALESCE(ROUND(AVG(r.rating)::numeric,1),0)::float rating FROM films f LEFT JOIN film_views v ON v.film_id=f.id LEFT JOIN film_ratings r ON r.film_id=f.id GROUP BY f.id ORDER BY views DESC LIMIT 50`),q(`SELECT to_char(day,'YYYY-MM-DD') day,COUNT(v.id)::int views,COALESCE(SUM(v.watched_seconds),0)::float watched_seconds FROM generate_series(current_date-13,current_date,interval '1 day') day LEFT JOIN film_views v ON v.started_at>=day AND v.started_at<day+interval '1 day' GROUP BY day ORDER BY day`)]);res.json({top:top.rows.map(x=>({...x,id:Number(x.id),views:Number(x.views),watched_seconds:Number(x.watched_seconds),rating:Number(x.rating)})),daily:views.rows.map(x=>({...x,views:Number(x.views),watched_seconds:Number(x.watched_seconds)}))})}catch(e){res.status(500).json({error:'آمار ZENTO PLAY ناموفق بود'})}});
+// Zento Play personalization + analytics
+app.get('/api/films/me/library',auth,async(req,res)=>{try{const [w,p,r]=await Promise.all([q(`SELECT f.id,f.title,f.poster_url,f.content_type,p.position_seconds,p.duration_seconds,p.completed,p.updated_at FROM film_watch_progress p JOIN films f ON f.id=p.film_id WHERE p.user_id=$1 AND p.episode_id=0 ORDER BY p.updated_at DESC LIMIT 50`,[req.user.id]),q(`SELECT f.id,f.title,f.poster_url,f.content_type,w.created_at FROM film_watchlist w JOIN films f ON f.id=w.film_id WHERE w.user_id=$1 ORDER BY w.created_at DESC LIMIT 100`,[req.user.id]),q(`SELECT f.id,f.title,r.rating,r.updated_at FROM film_ratings r JOIN films f ON f.id=r.film_id WHERE r.user_id=$1 ORDER BY r.updated_at DESC`,[req.user.id])]);res.json({continueWatching:w.rows.map(x=>({...x,id:Number(x.id)})),watchlist:p.rows.map(x=>({...x,id:Number(x.id)})),ratings:r.rows.map(x=>({...x,id:Number(x.id),rating:Number(x.rating)}))})}catch(e){res.status(500).json({error:'کتابخانه فیلم در دسترس نیست'})}});
+app.post('/api/films/:id/progress',auth,async(req,res)=>{try{const fid=Number(req.params.id),eid=req.body.episode_id?Number(req.body.episode_id):0,pos=Math.max(0,Number(req.body.position_seconds)||0),dur=Math.max(0,Number(req.body.duration_seconds)||0),completed=!!req.body.completed||!!dur&&pos>=Math.max(1,dur-15);await q(`INSERT INTO film_watch_progress(user_id,film_id,episode_id,position_seconds,duration_seconds,completed,updated_at) VALUES($1,$2,$3,$4,$5,$6,now()) ON CONFLICT(user_id,film_id,episode_id) DO UPDATE SET position_seconds=EXCLUDED.position_seconds,duration_seconds=EXCLUDED.duration_seconds,completed=EXCLUDED.completed,updated_at=now()`,[req.user.id,fid,eid,pos,dur,completed]);await q(`INSERT INTO film_views(user_id,film_id,episode_id,watched_seconds) VALUES($1,$2,$3,$4)`,[req.user.id,fid,eid,Math.min(pos,Math.max(dur,pos))]);res.json({ok:true,completed})}catch(e){res.status(500).json({error:'ذخیره پیشرفت پخش ناموفق بود'})}});
+app.post('/api/films/:id/watchlist',auth,async(req,res)=>{const fid=Number(req.params.id);if(req.body.add===false){await q('DELETE FROM film_watchlist WHERE user_id=$1 AND film_id=$2',[req.user.id,fid]);return res.json({ok:true,added:false})}await q('INSERT INTO film_watchlist(user_id,film_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.user.id,fid]);res.json({ok:true,added:true})});
+app.post('/api/films/:id/rating',auth,async(req,res)=>{const fid=Number(req.params.id),rating=Math.max(1,Math.min(5,Math.round(Number(req.body.rating)||0)));if(!rating)return res.status(400).json({error:'امتیاز نامعتبر است'});await q(`INSERT INTO film_ratings(user_id,film_id,rating) VALUES($1,$2,$3) ON CONFLICT(user_id,film_id) DO UPDATE SET rating=EXCLUDED.rating,updated_at=now()`,[req.user.id,fid,rating]);const a=await q('SELECT ROUND(AVG(rating)::numeric,1) avg,COUNT(*)::int count FROM film_ratings WHERE film_id=$1',[fid]);res.json({ok:true,rating,average:Number(a.rows[0]?.avg||0),count:Number(a.rows[0]?.count||0)})});
+app.get('/api/films/:id/stats',auth,async(req,res)=>{const fid=Number(req.params.id);const a=await q(`SELECT COUNT(*)::int views,COALESCE(SUM(watched_seconds),0)::float watched_seconds FROM film_views WHERE film_id=$1`,[fid]);const r=await q(`SELECT ROUND(AVG(rating)::numeric,1) avg,COUNT(*)::int count FROM film_ratings WHERE film_id=$1`,[fid]);res.json({views:Number(a.rows[0]?.views||0),watchedSeconds:Number(a.rows[0]?.watched_seconds||0),rating:Number(r.rows[0]?.avg||0),ratingCount:Number(r.rows[0]?.count||0)})});
 const filmUpload = multer({storage: multer.memoryStorage(),limits:{fileSize:500*1024*1024},fileFilter:(_req,file,cb)=>{const ok=/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.mimetype);cb(ok?null:new Error('فقط فایل پوستر تصویری یا ویدیویی مجاز است'),ok);}});
 app.post('/api/admin/films/upload', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), (req,res)=>{filmUpload.single('file')(req,res,async err=>{try{if(err)return res.status(400).json({error:err.message||'آپلود ناموفق بود'});if(!req.file)return res.status(400).json({error:'فایلی انتخاب نشده است'});const kind=String(req.body.kind||'');const isPoster=/^image\//.test(req.file.mimetype),isVideo=/^video\//.test(req.file.mimetype);if(kind==='poster'&&!isPoster)return res.status(400).json({error:'برای پوستر یک تصویر انتخاب کنید'});if(kind==='video'&&!isVideo)return res.status(400).json({error:'برای ویدیو یک فایل ویدیویی انتخاب کنید'});const stored=await uploadToStorage(req.file,'films',req.user.id);res.json({ok:true,url:stored.url,path:stored.path,name:safeFileName(req.file.originalname),mime:req.file.mimetype,size:req.file.size});}catch(e){console.error('film upload',e);res.status(500).json({error:'ذخیره فایل فیلم ناموفق بود'});}})});
 app.get('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const r=await q(`SELECT id,title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active,created_at,updated_at FROM films ORDER BY created_at DESC LIMIT 500`);res.json(await hydrateFilms(r.rows));}catch(e){res.status(500).json({error:'دریافت فیلم‌ها ناموفق بود'})}});
-app.post('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`INSERT INTO films(title,content_type,description,poster_url,video_url,video_sources,year,genre,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,true) RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null]);await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type});res.json((await hydrateFilms(r.rows))[0]);}catch(e){console.error('create film',e);res.status(500).json({error:'ساخت محتوا ناموفق بود'})}});
-app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5).map(s=>({quality:String(s.quality||'AUTO').slice(0,20),url:String(s.url||'').slice(0,2000)})).filter(s=>s.url):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,active=req.body.active!==false;if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,video_url=$5,video_sources=$6::jsonb,year=$7,genre=$8,duration_minutes=$9,active=$10,updated_at=now() WHERE id=$11 RETURNING *`,[title,type,description,poster,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,active,id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active});res.json((await hydrateFilms(r.rows))[0]);}catch(e){res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}});
+app.post('/api/admin/films', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),backdrop=String(req.body.backdrop_url||'').trim().slice(0,1500),trailer=String(req.body.trailer_url||'').trim().slice(0,2000),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,8):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,age=String(req.body.age_rating||'').slice(0,20),country=String(req.body.country||'').slice(0,120),cast=Array.isArray(req.body.cast)?req.body.cast.slice(0,30):[],tags=Array.isArray(req.body.tags)?req.body.tags.slice(0,30):[],subtitles=Array.isArray(req.body.subtitles)?req.body.subtitles.slice(0,20):[],audio=Array.isArray(req.body.audio_tracks)?req.body.audio_tracks.slice(0,20):[],featured=!!req.body.featured,status=['draft','scheduled','published','archived'].includes(String(req.body.status))?String(req.body.status):'published',scheduled=req.body.scheduled_at?new Date(req.body.scheduled_at):null,active=status==='published'&&(!scheduled||scheduled<=new Date());if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`INSERT INTO films(title,content_type,description,poster_url,backdrop_url,trailer_url,video_url,video_sources,year,genre,duration_minutes,age_rating,country,cast_json,tags_json,subtitles_json,audio_tracks_json,featured,status,scheduled_at,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21) RETURNING *`,[title,type,description,poster,backdrop,trailer,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,age,country,JSON.stringify(cast),JSON.stringify(tags),JSON.stringify(subtitles),JSON.stringify(audio),featured,status,scheduled,active]);await logAdmin(req.user.id,'create_film',Number(r.rows[0].id),{title,type,status});res.json((await hydrateFilms(r.rows))[0])}catch(e){console.error('create film',e);res.status(500).json({error:'ساخت محتوا ناموفق بود'})}});
+app.patch('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id),title=String(req.body.title||'').trim().slice(0,160),type=String(req.body.content_type||'movie')==='series'?'series':'movie',description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),backdrop=String(req.body.backdrop_url||'').trim().slice(0,1500),trailer=String(req.body.trailer_url||'').trim().slice(0,2000),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,8):[],year=req.body.year?Number(req.body.year):null,genre=String(req.body.genre||'').trim().slice(0,120),duration=req.body.duration_minutes?Number(req.body.duration_minutes):null,age=String(req.body.age_rating||'').slice(0,20),country=String(req.body.country||'').slice(0,120),cast=Array.isArray(req.body.cast)?req.body.cast.slice(0,30):[],tags=Array.isArray(req.body.tags)?req.body.tags.slice(0,30):[],subtitles=Array.isArray(req.body.subtitles)?req.body.subtitles.slice(0,20):[],audio=Array.isArray(req.body.audio_tracks)?req.body.audio_tracks.slice(0,20):[],featured=!!req.body.featured,status=['draft','scheduled','published','archived'].includes(String(req.body.status))?String(req.body.status):'published',scheduled=req.body.scheduled_at?new Date(req.body.scheduled_at):null,active=req.body.active!==false&&status==='published'&&(!scheduled||scheduled<=new Date());if(!title)return res.status(400).json({error:'عنوان محتوا الزامی است'});const r=await q(`UPDATE films SET title=$1,content_type=$2,description=$3,poster_url=$4,backdrop_url=$5,trailer_url=$6,video_url=$7,video_sources=$8::jsonb,year=$9,genre=$10,duration_minutes=$11,age_rating=$12,country=$13,cast_json=$14::jsonb,tags_json=$15::jsonb,subtitles_json=$16::jsonb,audio_tracks_json=$17::jsonb,featured=$18,status=$19,scheduled_at=$20,active=$21,updated_at=now() WHERE id=$22 RETURNING *`,[title,type,description,poster,backdrop,trailer,video,JSON.stringify(sources),Number.isFinite(year)?year:null,genre,Number.isFinite(duration)?duration:null,age,country,JSON.stringify(cast),JSON.stringify(tags),JSON.stringify(subtitles),JSON.stringify(audio),featured,status,scheduled,active,id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'update_film',id,{title,active,status});res.json((await hydrateFilms(r.rows))[0])}catch(e){console.error('update film',e);res.status(500).json({error:'ویرایش محتوا ناموفق بود'})}});
 app.delete('/api/admin/films/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async (req,res)=>{try{const id=Number(req.params.id);const r=await q('DELETE FROM films WHERE id=$1 RETURNING id',[id]);if(!r.rowCount)return res.status(404).json({error:'محتوا پیدا نشد'});await logAdmin(req.user.id,'delete_film',id,{});res.json({ok:true})}catch(e){res.status(500).json({error:'حذف محتوا ناموفق بود'})}});
 app.get('/api/admin/films/:id/seasons', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const filmId=Number(req.params.id);const r=await q(`SELECT id,film_id,season_number,title,poster_url,created_at FROM film_seasons WHERE film_id=$1 ORDER BY season_number`,[filmId]);const ids=r.rows.map(x=>Number(x.id));let er={rows:[]};if(ids.length)er=await q(`SELECT id,season_id,film_id,episode_number,title,description,poster_url,video_url,video_sources,duration_minutes,active FROM film_episodes WHERE season_id=ANY($1::bigint[]) ORDER BY season_id,episode_number`,[ids]);const em=new Map();for(const e of er.rows){const k=Number(e.season_id);if(!em.has(k))em.set(k,[]);em.get(k).push({...e,id:Number(e.id),season_id:k,film_id:Number(e.film_id),duration_minutes:e.duration_minutes?Number(e.duration_minutes):null,video_sources:Array.isArray(e.video_sources)?e.video_sources:[]});}res.json(r.rows.map(x=>({...x,id:Number(x.id),film_id:filmId,season_number:Number(x.season_number),episodes:em.get(Number(x.id))||[]})));}catch(e){res.status(500).json({error:'فصل‌ها در دسترس نیستند'})}});
 app.post('/api/admin/films/:id/seasons', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const filmId=Number(req.params.id),num=Math.max(1,Number(req.body.season_number)||1),title=String(req.body.title||`فصل ${num}`).trim().slice(0,160),poster=String(req.body.poster_url||'').trim().slice(0,1500);const r=await q(`INSERT INTO film_seasons(film_id,season_number,title,poster_url) VALUES($1,$2,$3,$4) RETURNING *`,[filmId,num,title,poster]);res.json({...r.rows[0],id:Number(r.rows[0].id),film_id:filmId,season_number:num,episodes:[]});}catch(e){if(e.code==='23505')return res.status(409).json({error:'این شماره فصل قبلاً ثبت شده است'});res.status(500).json({error:'ساخت فصل ناموفق بود'})}});
 app.delete('/api/admin/film-seasons/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{await q('DELETE FROM film_seasons WHERE id=$1',[Number(req.params.id)]);res.json({ok:true})}catch(e){res.status(500).json({error:'حذف فصل ناموفق بود'})}});
 app.post('/api/admin/film-seasons/:id/episodes', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{const seasonId=Number(req.params.id);const sr=await q('SELECT film_id FROM film_seasons WHERE id=$1',[seasonId]);if(!sr.rowCount)return res.status(404).json({error:'فصل پیدا نشد'});const filmId=Number(sr.rows[0].film_id),num=Math.max(1,Number(req.body.episode_number)||1),title=String(req.body.title||`قسمت ${num}`).trim().slice(0,160),description=String(req.body.description||'').trim().slice(0,5000),poster=String(req.body.poster_url||'').trim().slice(0,1500),video=String(req.body.video_url||'').trim().slice(0,2000),sources=Array.isArray(req.body.video_sources)?req.body.video_sources.slice(0,5):[],duration=req.body.duration_minutes?Number(req.body.duration_minutes):null;const r=await q(`INSERT INTO film_episodes(season_id,film_id,episode_number,title,description,poster_url,video_url,video_sources,duration_minutes,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,true) RETURNING *`,[seasonId,filmId,num,title,description,poster,video,JSON.stringify(sources),Number.isFinite(duration)?duration:null]);res.json({...r.rows[0],id:Number(r.rows[0].id),season_id:seasonId,film_id:filmId,episode_number:num,video_sources:Array.isArray(r.rows[0].video_sources)?r.rows[0].video_sources:[]});}catch(e){if(e.code==='23505')return res.status(409).json({error:'این شماره قسمت قبلاً ثبت شده است'});res.status(500).json({error:'ساخت قسمت ناموفق بود'})}});
 app.delete('/api/admin/film-episodes/:id', auth, (req,res,next)=>requireAdminPermission('films',req,res,next), async(req,res)=>{try{await q('DELETE FROM film_episodes WHERE id=$1',[Number(req.params.id)]);res.json({ok:true})}catch(e){res.status(500).json({error:'حذف قسمت ناموفق بود'})}});
+
+
+
+// ---- Zento v4.35 Ultimate Security / Media / Push API ----
+function fingerprintKey(publicKey){ return crypto.createHash('sha256').update(String(publicKey||'')).digest('hex').match(/.{1,4}/g).join(':').slice(0,59); }
+app.get('/api/ultimate/e2ee/fingerprint/:deviceId',auth,async(req,res)=>{
+  const d=await q(`SELECT device_id,public_key,label,algorithm,revoked_at FROM e2ee_devices WHERE device_id=$1 AND revoked_at IS NULL`,[String(req.params.deviceId)]);
+  if(!d.rowCount)return res.status(404).json({error:'دستگاه پیدا نشد'});
+  res.json({deviceId:d.rows[0].device_id,label:d.rows[0].label,algorithm:d.rows[0].algorithm,fingerprint:fingerprintKey(d.rows[0].public_key)});
+});
+app.get('/api/ultimate/conversations/:id/e2ee/fingerprints',auth,async(req,res)=>{
+  const cid=Number(req.params.id); if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});
+  const r=await q(`SELECT d.user_id,d.device_id,d.label,d.public_key,d.algorithm FROM e2ee_devices d JOIN conversation_members cm ON cm.user_id=d.user_id AND cm.conversation_id=$1 WHERE d.revoked_at IS NULL ORDER BY d.user_id,d.device_id`,[cid]);
+  res.json(r.rows.map(x=>({userId:Number(x.user_id),deviceId:x.device_id,label:x.label,algorithm:x.algorithm,fingerprint:fingerprintKey(x.public_key)})));
+});
+app.post('/api/ultimate/conversations/:id/e2ee/rotate',auth,async(req,res)=>{
+  const cid=Number(req.params.id); if(!await canManageConversation(cid,req.user.id))return res.status(403).json({error:'فقط مدیر می‌تواند چرخش کلید را انجام دهد'});
+  const r=await q(`SELECT COALESCE(MAX(key_version),0)+1 version FROM e2ee_key_envelopes WHERE conversation_id=$1`,[cid]);
+  const version=Number(r.rows[0].version||1);
+  await q(`UPDATE conversation_security SET updated_at=now() WHERE conversation_id=$1`,[cid]);
+  res.json({ok:true,version,reason:'client-must-generate-and-publish-new-envelopes'});
+});
+app.post('/api/ultimate/e2ee/attachment-manifest',auth,requireNotBanned,async(req,res)=>{
+  const cid=Number(req.body.conversationId); if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});
+  const hash=String(req.body.sha256||'').trim().slice(0,128),iv=String(req.body.iv||'').slice(0,200),keyVersion=Math.max(1,Number(req.body.keyVersion)||1),size=Math.max(0,Number(req.body.size)||0),mime=String(req.body.mime||'application/octet-stream').slice(0,120),name=String(req.body.name||'file').slice(0,255);
+  if(!hash||!iv)return res.status(400).json({error:'Manifest رمزنگاری ناقص است'});
+  const r=await q(`INSERT INTO encrypted_attachments(conversation_id,owner_id,sha256,iv,key_version,size_bytes,mime_type,file_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,created_at`,[cid,req.user.id,hash,iv,keyVersion,size,mime,name]);
+  res.json({ok:true,id:Number(r.rows[0].id),createdAt:r.rows[0].created_at});
+});
+app.get('/api/ultimate/e2ee/attachments/:id',auth,async(req,res)=>{const r=await q(`SELECT ea.* FROM encrypted_attachments ea JOIN conversation_members cm ON cm.conversation_id=ea.conversation_id AND cm.user_id=$2 WHERE ea.id=$1`,[Number(req.params.id),req.user.id]);if(!r.rowCount)return res.status(404).json({error:'فایل پیدا نشد'});res.json({...r.rows[0],id:Number(r.rows[0].id),size_bytes:Number(r.rows[0].size_bytes)});});
+app.post('/api/ultimate/calls/:id/security',auth,async(req,res)=>{const callId=Number(req.params.id); const call=(await q(`SELECT id,caller_id,receiver_id FROM calls WHERE id=$1`,[callId])).rows[0]; if(!call)return res.status(404).json({error:'تماس پیدا نشد'}); if(Number(call.caller_id)!==Number(req.user.id)&&Number(call.receiver_id)!==Number(req.user.id))return res.status(403).json({error:'دسترسی ندارید'}); const pub=String(req.body.publicKey||'').slice(0,12000);if(!pub)return res.status(400).json({error:'کلید تماس الزامی است'});await q(`INSERT INTO call_security(call_id,user_id,public_key,fingerprint) VALUES($1,$2,$3,$4) ON CONFLICT(call_id,user_id) DO UPDATE SET public_key=EXCLUDED.public_key,fingerprint=EXCLUDED.fingerprint,updated_at=now()`,[callId,req.user.id,pub,fingerprintKey(pub)]);res.json({ok:true,fingerprint:fingerprintKey(pub)});});
+app.get('/api/ultimate/calls/:id/security',auth,async(req,res)=>{const callId=Number(req.params.id);const call=(await q(`SELECT caller_id,receiver_id FROM calls WHERE id=$1`,[callId])).rows[0];if(!call||(Number(call.caller_id)!==Number(req.user.id)&&Number(call.receiver_id)!==Number(req.user.id)))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT user_id,fingerprint,created_at,updated_at FROM call_security WHERE call_id=$1 ORDER BY user_id`,[callId]);res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id)})));});
+app.get('/api/ultimate/push/health',auth,async(_req,res)=>{const r=await q(`SELECT status,COUNT(*)::int count FROM notification_jobs GROUP BY status ORDER BY status`);res.json({vapidConfigured:!!(process.env.VAPID_PUBLIC_KEY&&process.env.VAPID_PRIVATE_KEY&&process.env.VAPID_SUBJECT),queue:r.rows});});
+app.post('/api/ultimate/push/test',auth,async(req,res)=>{await q(`INSERT INTO notification_jobs(user_id,payload,status,available_at) VALUES($1,$2,'pending',now())`,[req.user.id,JSON.stringify({title:'Zento Ultimate',body:String(req.body?.body||'اعلان آزمایشی زنتو 🔔').slice(0,180),url:'/#/notifications'})]);res.json({ok:true,queued:true});});
+async function processNotificationJobs(){
+  try{
+    const r=await q(`WITH picked AS (SELECT id FROM notification_jobs WHERE status='pending' AND available_at<=now() ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 25) UPDATE notification_jobs j SET status='processing',attempts=attempts+1 FROM picked WHERE j.id=picked.id RETURNING j.*`);
+    for(const job of r.rows){try{await pushToUser(job.user_id,job.payload);await q(`UPDATE notification_jobs SET status='sent',sent_at=now() WHERE id=$1`,[job.id]);}catch(e){const attempts=Number(job.attempts||1);await q(`UPDATE notification_jobs SET status=$2,last_error=$3,available_at=now()+make_interval(secs => $4) WHERE id=$1`,[job.id,attempts>=5?'failed':'pending',String(e.message||e).slice(0,500),Math.min(300,attempts*15)]);}}
+  }catch(e){console.warn('notification queue',e.message)}
+}
+
+// ---- Zento v4.34 Enterprise API ----
+app.get('/api/enterprise/search', auth, async (req,res)=>{
+  try{
+    const term=String(req.query.q||'').trim().slice(0,120);
+    if(term.length<2)return res.json({messages:[],users:[],conversations:[]});
+    const like='%'+term.replace(/[%_]/g,'\\$&')+'%';
+    const users=await q(`SELECT id,username,display_name,avatar,verified FROM users WHERE (username ILIKE $1 ESCAPE '\\' OR display_name ILIKE $1 ESCAPE '\\') ORDER BY verified DESC,id DESC LIMIT 30`,[like]);
+    const conversations=await q(`SELECT c.id,c.type,c.name,c.username,c.photo,c.verified FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$2 WHERE c.name ILIKE $1 ESCAPE '\\' OR c.username ILIKE $1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT 30`,[like,req.user.id]);
+    const messages=await q(`SELECT m.id,m.conversation_id,m.sender_id,m.text,m.kind,m.created_at,u.display_name,u.username FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 LEFT JOIN users u ON u.id=m.sender_id WHERE m.deleted=false AND m.text ILIKE $1 ESCAPE '\\' ORDER BY m.created_at DESC LIMIT 100`,[like,req.user.id]);
+    res.json({users:users.rows.map(x=>({...x,id:Number(x.id),verified:!!x.verified})),conversations:conversations.rows.map(x=>({...x,id:Number(x.id),verified:!!x.verified})),messages:messages.rows.map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id),sender_id:Number(x.sender_id)}))});
+  }catch(e){console.error('enterprise search',e);res.status(500).json({error:'جستجوی پیشرفته ناموفق بود'});}
+});
+
+app.post('/api/enterprise/devices/register',auth,async(req,res)=>{
+  try{
+    const deviceId=String(req.body.deviceId||crypto.randomUUID()).slice(0,100),publicKey=String(req.body.publicKey||'').trim().slice(0,10000);
+    if(!publicKey)return res.status(400).json({error:'کلید عمومی دستگاه الزامی است'});
+    await q(`INSERT INTO e2ee_devices(user_id,device_id,public_key,label,algorithm) VALUES($1,$2,$3,$4,$5)
+      ON CONFLICT(user_id,device_id) DO UPDATE SET public_key=EXCLUDED.public_key,label=EXCLUDED.label,algorithm=EXCLUDED.algorithm,last_seen_at=now(),revoked_at=NULL`,[req.user.id,deviceId,publicKey,String(req.body.label||'دستگاه Zento').slice(0,100),String(req.body.algorithm||'ECDH-P256').slice(0,40)]);
+    res.json({ok:true,deviceId});
+  }catch(e){res.status(500).json({error:'ثبت دستگاه رمزنگاری ناموفق بود'});}
+});
+app.get('/api/enterprise/devices',auth,async(req,res)=>{const r=await q(`SELECT device_id,label,algorithm,created_at,last_seen_at,revoked_at FROM e2ee_devices WHERE user_id=$1 ORDER BY created_at DESC`,[req.user.id]);res.json(r.rows);});
+app.delete('/api/enterprise/devices/:deviceId',auth,async(req,res)=>{await q('UPDATE e2ee_devices SET revoked_at=now() WHERE user_id=$1 AND device_id=$2',[req.user.id,String(req.params.deviceId)]);res.json({ok:true});});
+
+app.post('/api/enterprise/conversations/:id/e2ee/enable',auth,async(req,res)=>{
+  const cid=Number(req.params.id); if(!await isMember(cid,req.user.id))return res.status(403).json({error:'عضو این گفتگو نیستید'});
+  await q(`INSERT INTO conversation_security(conversation_id,e2ee_enabled,enabled_by) VALUES($1,true,$2) ON CONFLICT(conversation_id) DO UPDATE SET e2ee_enabled=true,enabled_by=EXCLUDED.enabled_by,updated_at=now()`,[cid,req.user.id]);
+  res.json({ok:true,e2ee:true});
+});
+app.get('/api/enterprise/conversations/:id/e2ee',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q('SELECT e2ee_enabled,updated_at FROM conversation_security WHERE conversation_id=$1',[cid]);res.json({enabled:!!r.rows[0]?.e2ee_enabled,updated_at:r.rows[0]?.updated_at||null});});
+app.get('/api/enterprise/conversations/:id/e2ee/devices',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT d.user_id,d.device_id,d.public_key,d.label,d.algorithm,d.revoked_at FROM e2ee_devices d JOIN conversation_members cm ON cm.user_id=d.user_id AND cm.conversation_id=$1 WHERE d.revoked_at IS NULL ORDER BY d.user_id,d.created_at`,[cid]);res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id)})));});
+app.post('/api/enterprise/conversations/:id/e2ee/keys',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const deviceId=String(req.body.deviceId||'').slice(0,100),envelope=String(req.body.envelope||'').slice(0,20000),version=Math.max(1,Number(req.body.version)||1);if(!deviceId||!envelope)return res.status(400).json({error:'Envelope ناقص است'});const d=await q(`SELECT 1 FROM e2ee_devices d JOIN conversation_members cm ON cm.user_id=d.user_id AND cm.conversation_id=$1 WHERE d.device_id=$2 AND d.revoked_at IS NULL`,[cid,deviceId]);if(!d.rowCount)return res.status(403).json({error:'دستگاه معتبر این گفتگو نیست'});await q(`INSERT INTO e2ee_key_envelopes(conversation_id,device_id,key_version,envelope) VALUES($1,$2,$3,$4) ON CONFLICT(conversation_id,device_id,key_version) DO UPDATE SET envelope=EXCLUDED.envelope,created_at=now()`,[cid,deviceId,version,envelope]);res.json({ok:true,version});});
+app.get('/api/enterprise/conversations/:id/e2ee/keys',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT k.device_id,k.key_version,k.envelope,k.created_at FROM e2ee_key_envelopes k JOIN e2ee_devices d ON d.device_id=k.device_id WHERE k.conversation_id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ORDER BY k.key_version DESC,k.created_at DESC LIMIT 20`,[cid,req.user.id]);res.json(r.rows);});
+
+app.post('/api/enterprise/messages/encrypted',auth,requireNotBanned,async(req,res)=>{
+  try{
+    const cid=Number(req.body.conversationId),check=await canMessage(cid,req.user.id);if(!check.ok)return res.status(403).json({error:check.error});
+    const sec=await q('SELECT e2ee_enabled FROM conversation_security WHERE conversation_id=$1',[cid]);if(!sec.rows[0]?.e2ee_enabled)return res.status(409).json({error:'رمزنگاری سرتاسری برای این گفتگو فعال نیست'});
+    const ciphertext=String(req.body.ciphertext||'').slice(0,200000);if(!ciphertext)return res.status(400).json({error:'داده رمزنگاری‌شده خالی است'});
+    const r=await q(`INSERT INTO messages(conversation_id,sender_id,text,kind,e2ee_payload,e2ee) VALUES($1,$2,'','e2ee',$3::jsonb,true) RETURNING *`,[cid,req.user.id,JSON.stringify({ciphertext,iv:String(req.body.iv||'').slice(0,1000),version:Math.max(1,Number(req.body.version)||1),senderDeviceId:String(req.body.deviceId||'').slice(0,100)})]);
+    const out=await messageView(r.rows[0]);io.to('conv:'+cid).emit('message',out);res.json(out);
+  }catch(e){console.error('encrypted message',e);res.status(500).json({error:'ارسال پیام رمزنگاری‌شده ناموفق بود'});}
+});
+
+app.get('/api/enterprise/roles/:id',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT cr.id,cr.role_name,cr.permissions,cr.created_at,COUNT(cm.user_id)::int member_count FROM conversation_roles cr LEFT JOIN conversation_role_members crm ON crm.role_id=cr.id LEFT JOIN conversation_members cm ON cm.user_id=crm.user_id AND cm.conversation_id=cr.conversation_id WHERE cr.conversation_id=$1 GROUP BY cr.id ORDER BY cr.id`,[cid]);res.json(r.rows.map(x=>({...x,id:Number(x.id),permissions:x.permissions||{},member_count:Number(x.member_count||0)})));});
+app.post('/api/enterprise/roles/:id',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await canManageConversation(cid,req.user.id))return res.status(403).json({error:'فقط مدیر می‌تواند نقش بسازد'});const name=String(req.body.name||'نقش جدید').trim().slice(0,80);const permissions=req.body.permissions&&typeof req.body.permissions==='object'?req.body.permissions:{};const r=await q(`INSERT INTO conversation_roles(conversation_id,role_name,permissions) VALUES($1,$2,$3) RETURNING *`,[cid,name,JSON.stringify(permissions)]);res.json({...r.rows[0],id:Number(r.rows[0].id)});});
+app.put('/api/enterprise/roles/:id',auth,async(req,res)=>{const rid=Number(req.params.id);const x=await q('SELECT conversation_id FROM conversation_roles WHERE id=$1',[rid]);if(!x.rowCount)return res.status(404).json({error:'نقش پیدا نشد'});if(!await canManageConversation(x.rows[0].conversation_id,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const name=String(req.body.name||'نقش').trim().slice(0,80),permissions=req.body.permissions&&typeof req.body.permissions==='object'?req.body.permissions:{};const r=await q(`UPDATE conversation_roles SET role_name=$1,permissions=$2,updated_at=now() WHERE id=$3 RETURNING *`,[name,JSON.stringify(permissions),rid]);res.json({...r.rows[0],id:Number(r.rows[0].id)});});
+app.post('/api/enterprise/roles/:id/members/:userId',auth,async(req,res)=>{const rid=Number(req.params.id),uid=Number(req.params.userId);const x=await q('SELECT conversation_id FROM conversation_roles WHERE id=$1',[rid]);if(!x.rowCount)return res.status(404).json({error:'نقش پیدا نشد'});if(!await canManageConversation(x.rows[0].conversation_id,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});if(!await isMember(x.rows[0].conversation_id,uid))return res.status(404).json({error:'کاربر عضو گفتگو نیست'});await q('INSERT INTO conversation_role_members(role_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[rid,uid]);res.json({ok:true});});
+
+app.get('/api/enterprise/export',auth,async(req,res)=>{try{const uid=Number(req.user.id);const [u,c,m,b,f,s]=await Promise.all([q('SELECT id,username,email,display_name,bio,avatar,created_at,last_seen_at FROM users WHERE id=$1',[uid]),q('SELECT c.id,c.type,c.name,c.username,c.description,c.created_at FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=$1 ORDER BY c.id',[uid]),q('SELECT m.id,m.conversation_id,m.text,m.kind,m.created_at,m.sender_id FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$1 WHERE m.deleted=false ORDER BY m.created_at DESC LIMIT 10000',[uid]),q('SELECT * FROM message_bookmarks WHERE user_id=$1',[uid]),q('SELECT * FROM favorite_contacts WHERE user_id=$1',[uid]),q('SELECT * FROM user_preferences WHERE user_id=$1',[uid])]);res.setHeader('Content-Type','application/json');res.setHeader('Content-Disposition',`attachment; filename="zento-export-${uid}-${Date.now()}.json"`);res.json({version:'4.34',exportedAt:new Date().toISOString(),user:u.rows[0]||null,conversations:c.rows,messages:m.rows,bookmarks:b.rows,favorites:f.rows,preferences:s.rows[0]||null});}catch(e){console.error('export',e);res.status(500).json({error:'خروجی اطلاعات ناموفق بود'});}});
+
+app.get('/api/enterprise/health',auth,async(_req,res)=>{try{const r=await q(`SELECT current_database() database,current_setting('server_version') postgres_version,pg_size_pretty(pg_database_size(current_database())) database_size`);res.json({ok:true,version:'4.35.0',database:r.rows[0],features:['e2ee-key-rotation','key-fingerprint','encrypted-attachment-manifest','call-key-fingerprint','push-queue']});}catch(e){res.status(500).json({ok:false,error:'Enterprise health check failed'});}});
 
 // Generic API 404 fallback (must be after all concrete /api routes).
 app.use('/api',(req,res)=>res.status(404).json({error:'API endpoint not found'}));
@@ -2191,6 +2293,55 @@ async function isSiteAdmin(userId, permission){try{const r=await q('SELECT permi
 
 
 // ===== ZENTO PROFESSIONAL PACK v4.32 =====
+
+// ===== ZENTO ADVANCED PACK v4.33 =====
+function advancedToken(bytes=24){return crypto.randomBytes(bytes).toString('base64url')}
+async function ensureAdvancedSchema(){
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS edit_version INT NOT NULL DEFAULT 0`);
+  await q(`CREATE TABLE IF NOT EXISTS message_edit_history(id BIGSERIAL PRIMARY KEY,message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,editor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,old_text TEXT NOT NULL DEFAULT '',new_text TEXT NOT NULL DEFAULT '',edited_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE INDEX IF NOT EXISTS message_edit_history_msg_idx ON message_edit_history(message_id,edited_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS message_bookmarks(user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,collection TEXT NOT NULL DEFAULT 'عمومی',note TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(user_id,message_id))`);
+  await q(`CREATE INDEX IF NOT EXISTS message_bookmarks_user_idx ON message_bookmarks(user_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS chat_folders(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,name TEXT NOT NULL,icon TEXT NOT NULL DEFAULT '📁',position INT NOT NULL DEFAULT 0,include_types JSONB NOT NULL DEFAULT '[]'::jsonb,exclude_muted BOOLEAN NOT NULL DEFAULT false,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),UNIQUE(user_id,name))`);
+  await q(`CREATE TABLE IF NOT EXISTS chat_folder_members(folder_id BIGINT NOT NULL REFERENCES chat_folders(id) ON DELETE CASCADE,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,PRIMARY KEY(folder_id,conversation_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS notification_preferences(user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,mentions BOOLEAN NOT NULL DEFAULT true,replies BOOLEAN NOT NULL DEFAULT true,reactions BOOLEAN NOT NULL DEFAULT true,calls BOOLEAN NOT NULL DEFAULT true,stories BOOLEAN NOT NULL DEFAULT true,previews BOOLEAN NOT NULL DEFAULT true,sound BOOLEAN NOT NULL DEFAULT true,updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_join_requests(id BIGSERIAL PRIMARY KEY,conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),reviewed_at TIMESTAMPTZ,reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,UNIQUE(conversation_id,user_id))`);
+  await q(`CREATE INDEX IF NOT EXISTS join_requests_conv_idx ON conversation_join_requests(conversation_id,status,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS message_mentions(id BIGSERIAL PRIMARY KEY,message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),UNIQUE(message_id,user_id))`);
+  await q(`CREATE INDEX IF NOT EXISTS message_mentions_user_idx ON message_mentions(user_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS media_access_tokens(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,file_url TEXT NOT NULL,token TEXT NOT NULL UNIQUE,expires_at TIMESTAMPTZ NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  await q(`CREATE INDEX IF NOT EXISTS media_access_tokens_exp_idx ON media_access_tokens(expires_at)`);
+  await q(`CREATE INDEX IF NOT EXISTS messages_conversation_created_idx ON messages(conversation_id,created_at DESC)`);
+}
+
+async function canManageConversation(cid,uid){
+  const m=await q(`SELECT c.owner_id,EXISTS(SELECT 1 FROM conversation_admins ca WHERE ca.conversation_id=c.id AND ca.user_id=$2 AND COALESCE((ca.permissions->>'manage')::boolean,true)) admin FROM conversations c WHERE c.id=$1`,[cid,uid]);
+  return !!m.rowCount && (Number(m.rows[0].owner_id)===Number(uid) || m.rows[0].admin);
+}
+
+app.get('/api/messages/:id/edits',auth,async(req,res)=>{try{const id=Number(req.params.id);const m=(await q('SELECT conversation_id FROM messages WHERE id=$1',[id])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});const r=await q(`SELECT h.*,u.display_name,u.username FROM message_edit_history h JOIN users u ON u.id=h.editor_id WHERE h.message_id=$1 ORDER BY h.edited_at DESC`,[id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),message_id:Number(x.message_id),editor_id:Number(x.editor_id)})))}catch(e){res.status(500).json({error:'تاریخچه ویرایش در دسترس نیست'})}});
+app.get('/api/messages/:id/bookmark',auth,async(req,res)=>{const r=await q('SELECT * FROM message_bookmarks WHERE user_id=$1 AND message_id=$2',[req.user.id,Number(req.params.id)]);res.json(r.rows[0]||null)});
+app.post('/api/messages/:id/bookmark',auth,async(req,res)=>{try{const id=Number(req.params.id);const m=(await q('SELECT conversation_id FROM messages WHERE id=$1 AND deleted=false',[id])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});const collection=String(req.body.collection||'عمومی').trim().slice(0,80)||'عمومی';const note=String(req.body.note||'').slice(0,500);await q(`INSERT INTO message_bookmarks(user_id,message_id,collection,note) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,message_id) DO UPDATE SET collection=EXCLUDED.collection,note=EXCLUDED.note`,[req.user.id,id,collection,note]);res.json({ok:true,collection,note})}catch(e){res.status(500).json({error:'ذخیره پیام ناموفق بود'})}});
+app.delete('/api/messages/:id/bookmark',auth,async(req,res)=>{await q('DELETE FROM message_bookmarks WHERE user_id=$1 AND message_id=$2',[req.user.id,Number(req.params.id)]);res.json({ok:true})});
+app.get('/api/bookmarks',auth,async(req,res)=>{const collection=String(req.query.collection||'');const params=[req.user.id];let where='b.user_id=$1';if(collection){params.push(collection);where+=' AND b.collection=$2'}const r=await q(`SELECT b.*,m.conversation_id,m.sender_id,m.text,m.file_url,m.file_type,m.file_name,m.kind,m.created_at FROM message_bookmarks b JOIN messages m ON m.id=b.message_id WHERE ${where} ORDER BY b.created_at DESC LIMIT 500`,params);res.json(r.rows.map(x=>({...x,id:Number(x.id),message_id:Number(x.message_id),conversation_id:Number(x.conversation_id),sender_id:Number(x.sender_id)})))});
+
+app.get('/api/folders',auth,async(req,res)=>{const r=await q(`SELECT f.*,COALESCE(json_agg(json_build_object('id',c.id,'name',c.name,'type',c.type)) FILTER(WHERE c.id IS NOT NULL),'[]') conversations FROM chat_folders f LEFT JOIN chat_folder_members fm ON fm.folder_id=f.id LEFT JOIN conversations c ON c.id=fm.conversation_id WHERE f.user_id=$1 GROUP BY f.id ORDER BY f.position,f.id`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),user_id:Number(x.user_id),conversations:x.conversations||[]})))});
+app.post('/api/folders',auth,async(req,res)=>{const name=String(req.body.name||'').trim().slice(0,60);if(!name)return res.status(400).json({error:'نام پوشه لازم است'});try{const r=await q(`INSERT INTO chat_folders(user_id,name,icon,position,include_types,exclude_muted) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[req.user.id,name,String(req.body.icon||'📁').slice(0,8),Number(req.body.position)||0,JSON.stringify(Array.isArray(req.body.includeTypes)?req.body.includeTypes:[]),!!req.body.excludeMuted]);res.json({...r.rows[0],id:Number(r.rows[0].id)})}catch(e){res.status(409).json({error:'این پوشه قبلاً وجود دارد'})}});
+app.delete('/api/folders/:id',auth,async(req,res)=>{await q('DELETE FROM chat_folders WHERE id=$1 AND user_id=$2',[Number(req.params.id),req.user.id]);res.json({ok:true})});
+app.put('/api/folders/:id/conversations',auth,async(req,res)=>{const id=Number(req.params.id);const f=await q('SELECT id FROM chat_folders WHERE id=$1 AND user_id=$2',[id,req.user.id]);if(!f.rowCount)return res.status(404).json({error:'پوشه پیدا نشد'});const ids=[...new Set((Array.isArray(req.body.conversationIds)?req.body.conversationIds:[]).map(Number).filter(Boolean))];await q('DELETE FROM chat_folder_members WHERE folder_id=$1',[id]);for(const cid of ids){if(await isMember(cid,req.user.id))await q('INSERT INTO chat_folder_members(folder_id,conversation_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[id,cid])}res.json({ok:true,count:ids.length})});
+
+app.get('/api/notifications/preferences',auth,async(req,res)=>{const r=await q('SELECT * FROM notification_preferences WHERE user_id=$1',[req.user.id]);res.json(r.rows[0]||{mentions:true,replies:true,reactions:true,calls:true,stories:true,previews:true,sound:true})});
+app.put('/api/notifications/preferences',auth,async(req,res)=>{const b=req.body||{};const vals=['mentions','replies','reactions','calls','stories','previews','sound'].map(k=>b[k]!==false);const r=await q(`INSERT INTO notification_preferences(user_id,mentions,replies,reactions,calls,stories,previews,sound) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(user_id) DO UPDATE SET mentions=EXCLUDED.mentions,replies=EXCLUDED.replies,reactions=EXCLUDED.reactions,calls=EXCLUDED.calls,stories=EXCLUDED.stories,previews=EXCLUDED.previews,sound=EXCLUDED.sound,updated_at=now() RETURNING *`,[req.user.id,...vals]);res.json(r.rows[0])});
+
+app.post('/api/conversations/:id/join-request',auth,async(req,res)=>{try{const cid=Number(req.params.id);if(await isMember(cid,req.user.id))return res.status(400).json({error:'شما عضو این گفتگو هستید'});const c=(await q('SELECT type FROM conversations WHERE id=$1',[cid])).rows[0];if(!c)return res.status(404).json({error:'گفتگو پیدا نشد'});const msg=String(req.body.message||'').slice(0,500);const r=await q(`INSERT INTO conversation_join_requests(conversation_id,user_id,message) VALUES($1,$2,$3) ON CONFLICT(conversation_id,user_id) DO UPDATE SET status='pending',message=EXCLUDED.message,created_at=now(),reviewed_at=NULL,reviewed_by=NULL RETURNING *`,[cid,req.user.id,msg]);res.json({...r.rows[0],id:Number(r.rows[0].id),conversation_id:cid,user_id:Number(req.user.id)})}catch(e){res.status(500).json({error:'درخواست عضویت ثبت نشد'})}});
+app.get('/api/conversations/:id/join-requests',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await canManageConversation(cid,req.user.id))return res.status(403).json({error:'دسترسی مدیریت ندارید'});const r=await q(`SELECT jr.*,u.display_name,u.username,u.avatar FROM conversation_join_requests jr JOIN users u ON u.id=jr.user_id WHERE jr.conversation_id=$1 AND jr.status='pending' ORDER BY jr.created_at ASC`,[cid]);res.json(r.rows.map(x=>({...x,id:Number(x.id),conversation_id:cid,user_id:Number(x.user_id)})))});
+app.post('/api/join-requests/:id/review',auth,async(req,res)=>{const id=Number(req.params.id);const action=req.body.action==='approve'?'approved':'rejected';const r=(await q(`SELECT * FROM conversation_join_requests WHERE id=$1`,[id])).rows[0];if(!r)return res.status(404).json({error:'درخواست پیدا نشد'});if(!await canManageConversation(r.conversation_id,req.user.id))return res.status(403).json({error:'دسترسی مدیریت ندارید'});await q('UPDATE conversation_join_requests SET status=$1,reviewed_at=now(),reviewed_by=$2 WHERE id=$3',[action,req.user.id,id]);if(action==='approved')await q('INSERT INTO conversation_members(conversation_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[r.conversation_id,r.user_id]);io.to('conv:'+r.conversation_id).emit('join_request_reviewed',{requestId:id,status:action,userId:Number(r.user_id)});res.json({ok:true,status:action})});
+
+app.get('/api/search/global',auth,async(req,res)=>{try{const term=String(req.query.q||'').trim();if(term.length<2)return res.json({messages:[],users:[],conversations:[]});const like='%'+term+'%';const users=await q(`SELECT id,username,display_name,avatar,verified FROM users WHERE username ILIKE $1 OR display_name ILIKE $1 ORDER BY verified DESC,id DESC LIMIT 30`,[like]);const conversations=await q(`SELECT id,type,name,username,photo,verified FROM conversations WHERE name ILIKE $1 OR username ILIKE $1 ORDER BY updated_at DESC LIMIT 30`,[like]);const messages=await q(`SELECT m.id,m.conversation_id,m.sender_id,m.text,m.kind,m.file_url,m.created_at,c.name conversation_name FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 JOIN conversations c ON c.id=m.conversation_id WHERE m.deleted=false AND m.text ILIKE $1 ORDER BY m.created_at DESC LIMIT 100`,[like,req.user.id]);res.json({users:users.rows.map(x=>({...x,id:Number(x.id)})),conversations:conversations.rows.map(x=>({...x,id:Number(x.id)})),messages:messages.rows.map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id),sender_id:Number(x.sender_id)}))})}catch(e){res.status(500).json({error:'جستجوی سراسری ناموفق بود'})}});
+
+app.get('/api/media/access-token',auth,async(req,res)=>{const file=String(req.query.file||'');if(!file)return res.status(400).json({error:'فایل مشخص نشده'});const expires=Date.now()+10*60*1000;const token=advancedToken(32);await q(`INSERT INTO media_access_tokens(user_id,file_url,token,expires_at) VALUES($1,$2,$3,to_timestamp($4/1000.0))`,[req.user.id,file,token,expires]);res.json({token,expiresAt:new Date(expires).toISOString(),url:`/api/media/secure/${token}`})});
+app.get('/api/media/secure/:token',async(req,res)=>{const r=(await q('SELECT * FROM media_access_tokens WHERE token=$1 AND expires_at>now()',[String(req.params.token)])).rows[0];if(!r)return res.status(404).end();res.redirect(r.file_url)});
+
 async function ensureProfessionalSchema(){
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`);
   await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`);
@@ -2218,8 +2369,8 @@ function base32Secret(){const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let out='
 function totp(secret,step=Math.floor(Date.now()/30000)){try{const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';let bits='';for(const c of secret)bits+=chars.indexOf(c).toString(2).padStart(5,'0');const buf=Buffer.alloc(Math.floor(bits.length/8));for(let i=0;i<buf.length;i++)buf[i]=parseInt(bits.slice(i*8,i*8+8),2);const h=crypto.createHmac('sha1',buf).update(Buffer.from(BigInt(step).toString(16).padStart(16,'0'),'hex')).digest();const o=h[h.length-1]&15;return String(((h.readUInt32BE(o)&0x7fffffff)%1000000)).padStart(6,'0')}catch{return ''}}
 function verifyTotp(secret,code){for(let d=-1;d<=1;d++)if(totp(secret,Math.floor(Date.now()/30000)+d)===String(code||''))return true;return false}
 
-app.patch('/api/messages/:id',auth,requireNotBanned,async(req,res)=>{try{const id=Number(req.params.id);const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[id])).rows[0];if(!m)return res.status(404).json({error:'پیام پیدا نشد'});if(Number(m.sender_id)!==Number(req.user.id))return res.status(403).json({error:'فقط فرستنده می‌تواند پیام را ویرایش کند'});if(Date.now()-new Date(m.created_at).getTime()>48*3600e3)return res.status(400).json({error:'مهلت ویرایش این پیام تمام شده است'});const text=String(req.body.text||'').trim().slice(0,5000);if(!text&&!m.file_url)return res.status(400).json({error:'متن خالی است'});const r=await q('UPDATE messages SET text=$1,edited_at=now() WHERE id=$2 RETURNING *',[text,id]);const out=await messageView(r.rows[0]);io.to('conv:'+m.conversation_id).emit('message_edited',out);res.json(out)}catch(e){res.status(500).json({error:'ویرایش پیام ناموفق بود'})}});
-app.post('/api/messages/:id/pin',auth,async(req,res)=>{try{const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});await q(`INSERT INTO message_pins(conversation_id,message_id,pinned_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,[m.conversation_id,m.id,req.user.id]);await q('UPDATE messages SET pinned_at=now() WHERE id=$1',[m.id]);await q('INSERT INTO admin_action_logs(conversation_id,admin_id,action,details) VALUES($1,$2,$3,$4)',[m.conversation_id,req.user.id,'pin_message',JSON.stringify({messageId:m.id})]);io.to('conv:'+m.conversation_id).emit('message_pinned',{messageId:Number(m.id)});res.json({ok:true})}catch(e){res.status(500).json({error:'پین پیام ناموفق بود'})}});
+app.patch('/api/messages/:id',auth,requireNotBanned,async(req,res)=>{try{const id=Number(req.params.id);const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[id])).rows[0];if(!m)return res.status(404).json({error:'پیام پیدا نشد'});if(Number(m.sender_id)!==Number(req.user.id))return res.status(403).json({error:'فقط فرستنده می‌تواند پیام را ویرایش کند'});if(Date.now()-new Date(m.created_at).getTime()>48*3600e3)return res.status(400).json({error:'مهلت ویرایش این پیام تمام شده است'});const text=String(req.body.text||'').trim().slice(0,5000);if(!text&&!m.file_url)return res.status(400).json({error:'متن خالی است'});await q('INSERT INTO message_edit_history(message_id,editor_id,old_text,new_text) VALUES($1,$2,$3,$4)',[id,req.user.id,m.text||'',text]);const r=await q('UPDATE messages SET text=$1,edited_at=now(),edit_version=COALESCE(edit_version,0)+1 WHERE id=$2 RETURNING *',[text,id]);const out=await messageView(r.rows[0]);io.to('conv:'+m.conversation_id).emit('message_edited',out);res.json(out)}catch(e){res.status(500).json({error:'ویرایش پیام ناموفق بود'})}});
+app.post('/api/messages/:id/pin',auth,async(req,res)=>{try{const m=(await q('SELECT * FROM messages WHERE id=$1 AND deleted=false',[Number(req.params.id)])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});if(!await canManageConversation(m.conversation_id,req.user.id))return res.status(403).json({error:'فقط مدیر می‌تواند پیام را پین کند'});await q(`INSERT INTO message_pins(conversation_id,message_id,pinned_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,[m.conversation_id,m.id,req.user.id]);await q('UPDATE messages SET pinned_at=now() WHERE id=$1',[m.id]);await q('INSERT INTO admin_action_logs(conversation_id,admin_id,action,details) VALUES($1,$2,$3,$4)',[m.conversation_id,req.user.id,'pin_message',JSON.stringify({messageId:m.id})]);io.to('conv:'+m.conversation_id).emit('message_pinned',{messageId:Number(m.id)});res.json({ok:true})}catch(e){res.status(500).json({error:'پین پیام ناموفق بود'})}});
 app.delete('/api/messages/:id/pin',auth,async(req,res)=>{const m=(await q('SELECT conversation_id FROM messages WHERE id=$1',[Number(req.params.id)])).rows[0];if(!m||!await isMember(m.conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'});await q('DELETE FROM message_pins WHERE conversation_id=$1 AND message_id=$2',[m.conversation_id,Number(req.params.id)]);await q('UPDATE messages SET pinned_at=NULL WHERE id=$1',[Number(req.params.id)]);io.to('conv:'+m.conversation_id).emit('message_unpinned',{messageId:Number(req.params.id)});res.json({ok:true})});
 app.get('/api/conversations/:id/pins',auth,async(req,res)=>{const cid=Number(req.params.id);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});const r=await q(`SELECT p.*,m.text,m.sender_id,m.created_at,u.display_name,u.username FROM message_pins p JOIN messages m ON m.id=p.message_id JOIN users u ON u.id=m.sender_id WHERE p.conversation_id=$1 ORDER BY p.pinned_at DESC LIMIT 100`,[cid]);res.json(r.rows.map(x=>({...x,id:Number(x.id),message_id:Number(x.message_id),sender_id:Number(x.sender_id)})))});
 app.post('/api/conversations/:id/poll',auth,requireNotBanned,async(req,res)=>{try{const cid=Number(req.params.id);const ck=await canMessage(cid,req.user.id);if(!ck.ok)return res.status(403).json({error:ck.error});const question=String(req.body.question||'').trim().slice(0,500);const options=(Array.isArray(req.body.options)?req.body.options:[]).map(x=>String(x).trim().slice(0,120)).filter(Boolean).slice(0,10);if(!question||options.length<2)return res.status(400).json({error:'سؤال و حداقل دو گزینه لازم است'});const m=await insertMessage({cid,uid:req.user.id,text:'📊 '+question,kind:'poll'});await q('INSERT INTO polls(message_id,question,options,multiple,anonymous) VALUES($1,$2,$3,$4,$5)',[m.id,question,JSON.stringify(options),!!req.body.multiple,!!req.body.anonymous]);io.to('conv:'+cid).emit('message',m);res.json(m)}catch(e){res.status(500).json({error:'ساخت نظرسنجی ناموفق بود'})}});
@@ -2253,6 +2404,94 @@ app.delete('/api/security/sessions',auth,async(req,res)=>{await q('UPDATE user_s
 
 async function processScheduledMessages(){try{const r=await q(`SELECT * FROM scheduled_messages WHERE status='pending' AND schedule_at<=now() ORDER BY schedule_at LIMIT 50`);for(const x of r.rows){try{const out=await insertMessage({cid:Number(x.conversation_id),uid:Number(x.user_id),text:x.text,kind:x.kind,fileUrl:x.file_url,fileType:x.file_type,fileName:x.file_name,replyTo:x.reply_to?Number(x.reply_to):null});await q('UPDATE scheduled_messages SET status=\'sent\' WHERE id=$1',[x.id]);io.to('conv:'+x.conversation_id).emit('message',out)}catch(e){await q('UPDATE scheduled_messages SET status=\'failed\' WHERE id=$1',[x.id]);console.error('scheduled',e.message)}}}catch(e){console.error('scheduled worker',e.message)}}
 
+
+async function ensureEnterpriseSchema(){
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee BOOLEAN NOT NULL DEFAULT false`);
+  await q(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS e2ee_payload JSONB`);
+  await q(`CREATE INDEX IF NOT EXISTS messages_conversation_created_idx ON messages(conversation_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS e2ee_devices (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT 'دستگاه Zento',
+    algorithm TEXT NOT NULL DEFAULT 'ECDH-P256',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at TIMESTAMPTZ,
+    UNIQUE(user_id,device_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS e2ee_devices_user_idx ON e2ee_devices(user_id,revoked_at)`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_security (
+    conversation_id BIGINT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    e2ee_enabled BOOLEAN NOT NULL DEFAULT false,
+    enabled_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS e2ee_key_envelopes (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    key_version INT NOT NULL DEFAULT 1,
+    envelope TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(conversation_id,device_id,key_version)
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_roles (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role_name TEXT NOT NULL,
+    permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(conversation_id,role_name)
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS conversation_role_members (
+    role_id BIGINT NOT NULL REFERENCES conversation_roles(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(role_id,user_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS conversation_role_members_user_idx ON conversation_role_members(user_id)`);
+  await q(`CREATE TABLE IF NOT EXISTS notification_jobs (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    payload JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed')),
+    attempts INT NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at TIMESTAMPTZ,
+    last_error TEXT
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS notification_jobs_pending_idx ON notification_jobs(status,available_at)`);
+}
+
+
+  await q(`CREATE TABLE IF NOT EXISTS encrypted_attachments (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sha256 TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    key_version INT NOT NULL DEFAULT 1,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    file_name TEXT NOT NULL DEFAULT 'file',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS encrypted_attachments_conv_idx ON encrypted_attachments(conversation_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS call_security (
+    call_id BIGINT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(call_id,user_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS call_security_user_idx ON call_security(user_id,updated_at DESC)`);
+
 async function ensureFilmSchema(){
   await q(`CREATE TABLE IF NOT EXISTS films (
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -2270,6 +2509,15 @@ async function ensureFilmSchema(){
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   await q(`ALTER TABLE films ADD COLUMN IF NOT EXISTS video_sources JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  for (const [col,sql] of [['backdrop_url','TEXT NOT NULL DEFAULT \'\''],['trailer_url','TEXT NOT NULL DEFAULT \'\''],['age_rating','TEXT NOT NULL DEFAULT \'\''],['country','TEXT NOT NULL DEFAULT \'\''],['cast_json','JSONB NOT NULL DEFAULT \'[]\'::jsonb'],['tags_json','JSONB NOT NULL DEFAULT \'[]\'::jsonb'],['subtitles_json','JSONB NOT NULL DEFAULT \'[]\'::jsonb'],['audio_tracks_json','JSONB NOT NULL DEFAULT \'[]\'::jsonb'],['featured','BOOLEAN NOT NULL DEFAULT false'],['scheduled_at','TIMESTAMPTZ'],['status','TEXT NOT NULL DEFAULT \'published\'']]) await q(`ALTER TABLE films ADD COLUMN IF NOT EXISTS ${col} ${sql}`);
+  await q(`CREATE INDEX IF NOT EXISTS films_featured_idx ON films(featured,active,created_at DESC)`);
+  await q(`CREATE INDEX IF NOT EXISTS films_schedule_idx ON films(scheduled_at) WHERE scheduled_at IS NOT NULL`);
+  await q(`CREATE TABLE IF NOT EXISTS film_watch_progress (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE, episode_id BIGINT NOT NULL DEFAULT 0, position_seconds DOUBLE PRECISION NOT NULL DEFAULT 0, duration_seconds DOUBLE PRECISION NOT NULL DEFAULT 0, completed BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,film_id,episode_id))`);
+  await q(`CREATE INDEX IF NOT EXISTS film_progress_user_idx ON film_watch_progress(user_id,updated_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS film_watchlist (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,film_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS film_ratings (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE, rating SMALLINT NOT NULL CHECK(rating BETWEEN 1 AND 5), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(user_id,film_id))`);
+  await q(`CREATE TABLE IF NOT EXISTS film_views (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE, episode_id BIGINT, started_at TIMESTAMPTZ NOT NULL DEFAULT now(), watched_seconds DOUBLE PRECISION NOT NULL DEFAULT 0)`);
+  await q(`CREATE INDEX IF NOT EXISTS film_views_film_idx ON film_views(film_id,started_at DESC)`);
   await q(`CREATE TABLE IF NOT EXISTS film_seasons (
     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     film_id BIGINT NOT NULL REFERENCES films(id) ON DELETE CASCADE,
@@ -2311,7 +2559,176 @@ async function ensureStorageBucket(){
   }
 }
 
+
+
+// ===== ZENTO v4.36 SUPER APP CORE =====
+function superAppToken(bytes=32){return crypto.randomBytes(bytes).toString('base64url')}
+function superAppHash(v){return crypto.createHash('sha256').update(String(v)).digest('hex')}
+async function ensureSuperAppSchema(){
+  await q(`CREATE TABLE IF NOT EXISTS qr_login_challenges(
+    id BIGSERIAL PRIMARY KEY, challenge_hash TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','consumed','expired','cancelled')),
+    approved_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, approved_token_hash TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, approved_at TIMESTAMPTZ, consumed_at TIMESTAMPTZ
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS qr_login_challenges_exp_idx ON qr_login_challenges(status,expires_at)`);
+  await q(`CREATE TABLE IF NOT EXISTS sync_devices(
+    id UUID PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT 'دستگاه جدید', platform TEXT NOT NULL DEFAULT 'web', user_agent TEXT NOT NULL DEFAULT '', last_cursor TIMESTAMPTZ, last_sync_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS sync_devices_user_idx ON sync_devices(user_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS encrypted_backups(
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, device_id UUID REFERENCES sync_devices(id) ON DELETE SET NULL,
+    algorithm TEXT NOT NULL DEFAULT 'AES-GCM-PBKDF2', salt TEXT NOT NULL, iv TEXT NOT NULL, ciphertext TEXT NOT NULL, size_bytes BIGINT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS encrypted_backups_user_idx ON encrypted_backups(user_id,updated_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS live_locations(
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,
+    latitude DOUBLE PRECISION NOT NULL, longitude DOUBLE PRECISION NOT NULL, accuracy DOUBLE PRECISION, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(user_id,conversation_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS live_locations_exp_idx ON live_locations(expires_at)`);
+  await q(`CREATE TABLE IF NOT EXISTS secure_share_links(
+    id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, resource_type TEXT NOT NULL, resource_id BIGINT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE, max_uses INT NOT NULL DEFAULT 1, uses INT NOT NULL DEFAULT 0, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS secure_share_links_owner_idx ON secure_share_links(owner_id,created_at DESC)`);
+  await q(`CREATE TABLE IF NOT EXISTS user_security_events(
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, event_type TEXT NOT NULL, ip_address TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '', details JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS user_security_events_idx ON user_security_events(user_id,created_at DESC)`);
+}
+async function recordSecurityEvent(uid,type,req,details={}){try{await q('INSERT INTO user_security_events(user_id,event_type,ip_address,user_agent,details) VALUES($1,$2,$3,$4,$5)',[uid,type,String(req?.ip||'').slice(0,100),String(req?.headers?.['user-agent']||'').slice(0,500),JSON.stringify(details||{})])}catch(e){console.warn('security event',e.message)}}
+
+// QR login: unauthenticated browser creates a short-lived challenge; an authenticated device approves it.
+app.post('/api/superapp/qr-login/challenge', async (req,res)=>{
+  try{
+    const raw=superAppToken(32), hash=superAppHash(raw), expires=new Date(Date.now()+2*60*1000);
+    await q(`INSERT INTO qr_login_challenges(challenge_hash,expires_at) VALUES($1,$2)`,[hash,expires]);
+    res.json({ok:true,challenge:raw,expires_at:expires.toISOString(),poll_after_ms:1200});
+  }catch(e){res.status(500).json({error:'ساخت QR ورود ناموفق بود'})}
+});
+app.get('/api/superapp/qr-login/status', async (req,res)=>{
+  try{
+    const raw=String(req.query.challenge||''), hash=superAppHash(raw);
+    const r=await q(`SELECT id,status,expires_at,approved_token_hash FROM qr_login_challenges WHERE challenge_hash=$1`,[hash]);
+    if(!r.rowCount)return res.status(404).json({error:'کد ورود پیدا نشد'});
+    const x=r.rows[0];
+    if(new Date(x.expires_at).getTime()<Date.now() && x.status==='pending'){await q('UPDATE qr_login_challenges SET status=\'expired\' WHERE id=$1',[x.id]);return res.json({status:'expired'});}
+    if(x.status==='approved' && x.approved_token_hash){
+      const sr=await q(`SELECT token FROM user_sessions WHERE token_hash=$1 LIMIT 1`,[x.approved_token_hash]);
+      if(sr.rowCount){await q(`UPDATE qr_login_challenges SET status='consumed',consumed_at=now() WHERE id=$1`,[x.id]);return res.json({status:'approved',token:sr.rows[0].token});}
+    }
+    res.json({status:x.status});
+  }catch(e){res.status(500).json({error:'بررسی QR ناموفق بود'})}
+});
+app.post('/api/superapp/qr-login/approve',auth,async(req,res)=>{
+  try{
+    const raw=String(req.body.challenge||''),hash=superAppHash(raw);
+    const r=await q(`SELECT id,status,expires_at FROM qr_login_challenges WHERE challenge_hash=$1 FOR UPDATE`,[hash]);
+    if(!r.rowCount)return res.status(404).json({error:'کد ورود پیدا نشد'});
+    const x=r.rows[0]; if(x.status!=='pending'||new Date(x.expires_at).getTime()<Date.now())return res.status(400).json({error:'این QR منقضی یا استفاده‌شده است'});
+    const token=await tokenFor(await getUser(req.user.id),{label:'QR Login',userAgent:req.headers['user-agent'],ip:req.ip});
+    const th=superAppHash(token);
+    await q(`UPDATE qr_login_challenges SET status='approved',approved_user_id=$1,approved_token_hash=$2,approved_at=now() WHERE id=$3`,[req.user.id,th,x.id]);
+    await recordSecurityEvent(req.user.id,'qr_login_approved',req,{});
+    res.json({ok:true});
+  }catch(e){console.error('qr approve',e);res.status(500).json({error:'تأیید QR ناموفق بود'})}
+});
+
+app.post('/api/superapp/devices/register',auth,async(req,res)=>{
+  try{
+    const id=crypto.randomUUID(),name=String(req.body.name||'دستگاه جدید').trim().slice(0,80)||'دستگاه جدید',platform=String(req.body.platform||'web').slice(0,30);
+    const r=await q(`INSERT INTO sync_devices(id,user_id,name,platform,user_agent) VALUES($1,$2,$3,$4,$5) RETURNING *`,[id,req.user.id,name,platform,String(req.headers['user-agent']||'').slice(0,500)]);
+    res.json({...r.rows[0],id:String(r.rows[0].id),user_id:Number(r.rows[0].user_id)});
+  }catch(e){res.status(500).json({error:'ثبت دستگاه ناموفق بود'})}
+});
+app.get('/api/superapp/devices',auth,async(req,res)=>{const r=await q(`SELECT id,name,platform,user_agent,last_cursor,last_sync_at,created_at,revoked_at FROM sync_devices WHERE user_id=$1 ORDER BY created_at DESC`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:String(x.id),revoked_at:x.revoked_at||null}))) });
+app.delete('/api/superapp/devices/:id',auth,async(req,res)=>{const r=await q(`UPDATE sync_devices SET revoked_at=now() WHERE id=$1 AND user_id=$2 RETURNING id`,[String(req.params.id),req.user.id]);if(!r.rowCount)return res.status(404).json({error:'دستگاه پیدا نشد'});res.json({ok:true})});
+
+// Incremental cloud sync. The cursor is server time; only records visible to the user are returned.
+app.get('/api/superapp/sync',auth,async(req,res)=>{
+  try{
+    const deviceId=String(req.query.device_id||''); if(!deviceId)return res.status(400).json({error:'device_id لازم است'});
+    const d=await q('SELECT id FROM sync_devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL',[deviceId,req.user.id]); if(!d.rowCount)return res.status(403).json({error:'دستگاه معتبر نیست'});
+    const cursorRaw=String(req.query.cursor||'1970-01-01T00:00:00.000Z');
+    const cursor=new Date(cursorRaw); if(Number.isNaN(cursor.getTime()))return res.status(400).json({error:'cursor نامعتبر است'});
+    const members=await q('SELECT conversation_id FROM conversation_members WHERE user_id=$1',[req.user.id]);
+    const ids=members.rows.map(x=>Number(x.conversation_id));
+    let messages=[];
+    if(ids.length){
+      const r=await q(`SELECT m.id,m.conversation_id,m.sender_id,m.text,m.kind,m.file_url,m.file_type,m.file_name,m.reply_to,m.created_at,m.edited_at FROM messages m WHERE m.conversation_id=ANY($1::bigint[]) AND m.created_at>$2 AND m.deleted=false ORDER BY m.created_at ASC LIMIT 1000`,[ids,cursor]);
+      messages=r.rows.map(x=>({...x,id:Number(x.id),conversation_id:Number(x.conversation_id),sender_id:Number(x.sender_id),reply_to:x.reply_to?Number(x.reply_to):null}));
+    }
+    const next=new Date().toISOString();
+    await q('UPDATE sync_devices SET last_cursor=$1,last_sync_at=now() WHERE id=$2',[next,deviceId]);
+    res.json({ok:true,cursor:next,has_more:messages.length>=1000,messages});
+  }catch(e){console.error('sync',e);res.status(500).json({error:'همگام‌سازی ناموفق بود'})}
+});
+
+app.get('/api/superapp/backup-source',auth,async(req,res)=>{
+  try{
+    const uid=Number(req.user.id);
+    const [u,c,m,b,f]=await Promise.all([
+      q('SELECT id,username,email,display_name,bio,avatar,verified,is_official,created_at,last_seen_at FROM users WHERE id=$1',[uid]),
+      q('SELECT c.id,c.type,c.name,c.username,c.description,c.created_at,c.updated_at FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=$1 ORDER BY c.id',[uid]),
+      q('SELECT m.id,m.conversation_id,m.sender_id,m.text,m.kind,m.file_type,m.file_name,m.reply_to,m.created_at,m.edited_at FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$1 WHERE m.deleted=false ORDER BY m.created_at DESC LIMIT 20000',[uid]),
+      q('SELECT collection,note,message_id,created_at FROM message_bookmarks WHERE user_id=$1',[uid]),
+      q('SELECT conversation_id,pinned,muted,archived,updated_at FROM conversation_user_settings WHERE user_id=$1',[uid])
+    ]);
+    res.json({version:'4.36',exported_at:new Date().toISOString(),user:u.rows[0]||null,conversations:c.rows,messages:m.rows,bookmarks:b.rows,chat_settings:f.rows});
+  }catch(e){console.error('backup source',e);res.status(500).json({error:'آماده‌سازی بکاپ ناموفق بود'})}
+});
+
+// Encrypted backup vault: server stores ciphertext only and cannot decrypt it.
+app.post('/api/superapp/backups',auth,async(req,res)=>{
+  try{
+    const salt=String(req.body.salt||''),iv=String(req.body.iv||''),ciphertext=String(req.body.ciphertext||''),deviceId=req.body.device_id?String(req.body.device_id):null;
+    if(!salt||!iv||!ciphertext||ciphertext.length>40*1024*1024)return res.status(400).json({error:'بکاپ رمزنگاری‌شده نامعتبر است'});
+    if(deviceId){const d=await q('SELECT 1 FROM sync_devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL',[deviceId,req.user.id]);if(!d.rowCount)return res.status(403).json({error:'دستگاه معتبر نیست'})}
+    const r=await q(`INSERT INTO encrypted_backups(user_id,device_id,salt,iv,ciphertext,size_bytes) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at,updated_at,size_bytes`,[req.user.id,deviceId,salt,iv,ciphertext,Buffer.byteLength(ciphertext,'utf8')]);
+    res.json({...r.rows[0],id:Number(r.rows[0].id)});
+  }catch(e){res.status(500).json({error:'ذخیره بکاپ ناموفق بود'})}
+});
+app.get('/api/superapp/backups/latest',auth,async(req,res)=>{const r=await q(`SELECT id,device_id,algorithm,salt,iv,ciphertext,size_bytes,created_at,updated_at FROM encrypted_backups WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1`,[req.user.id]);if(!r.rowCount)return res.status(404).json({error:'بکاپی وجود ندارد'});res.json({...r.rows[0],id:Number(r.rows[0].id),size_bytes:Number(r.rows[0].size_bytes||0)})});
+
+// Optional live-location sharing with strict expiry. Recipients must be members of the conversation.
+app.post('/api/superapp/live-location',auth,async(req,res)=>{
+  try{
+    const cid=Number(req.body.conversation_id),lat=Number(req.body.latitude),lng=Number(req.body.longitude),accuracy=req.body.accuracy==null?null:Number(req.body.accuracy),minutes=Math.min(1440,Math.max(1,Number(req.body.minutes||30)));
+    if(!cid||!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)return res.status(400).json({error:'مختصات نامعتبر است'});
+    if(!await isMember(cid,req.user.id))return res.status(403).json({error:'عضو این گفتگو نیستید'});
+    const expires=new Date(Date.now()+minutes*60000);
+    const r=await q(`INSERT INTO live_locations(user_id,conversation_id,latitude,longitude,accuracy,expires_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id,conversation_id) DO UPDATE SET latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,accuracy=EXCLUDED.accuracy,expires_at=EXCLUDED.expires_at,updated_at=now() RETURNING *`,[req.user.id,cid,lat,lng,accuracy,expires]);
+    io.to('conv:'+cid).emit('live_location:updated',{user_id:Number(req.user.id),conversation_id:cid,expires_at:expires.toISOString()});
+    res.json({...r.rows[0],id:Number(r.rows[0].id),user_id:Number(r.rows[0].user_id),conversation_id:Number(r.rows[0].conversation_id)});
+  }catch(e){res.status(500).json({error:'اشتراک موقعیت ناموفق بود'})}
+});
+app.get('/api/superapp/live-location/:conversationId',auth,async(req,res)=>{const cid=Number(req.params.conversationId);if(!await isMember(cid,req.user.id))return res.status(403).json({error:'دسترسی ندارید'});await q('DELETE FROM live_locations WHERE expires_at<=now()');const r=await q(`SELECT l.user_id,l.conversation_id,l.latitude,l.longitude,l.accuracy,l.expires_at,u.display_name,u.username,u.avatar FROM live_locations l JOIN users u ON u.id=l.user_id WHERE l.conversation_id=$1 AND l.expires_at>now()`,[cid]);res.json(r.rows.map(x=>({...x,user_id:Number(x.user_id),conversation_id:Number(x.conversation_id)}))) });
+app.delete('/api/superapp/live-location/:conversationId',auth,async(req,res)=>{await q('DELETE FROM live_locations WHERE conversation_id=$1 AND user_id=$2',[Number(req.params.conversationId),req.user.id]);res.json({ok:true})});
+
+// Secure one-time share links for message resources.
+app.post('/api/superapp/share-links',auth,async(req,res)=>{
+  try{
+    const type=String(req.body.resource_type||'message').slice(0,30),rid=Number(req.body.resource_id),uses=Math.min(20,Math.max(1,Number(req.body.max_uses||1))),minutes=Math.min(10080,Math.max(1,Number(req.body.minutes||60)));
+    if(!rid)return res.status(400).json({error:'resource_id لازم است'});
+    if(type==='message'){const m=await q('SELECT conversation_id FROM messages WHERE id=$1 AND deleted=false',[rid]);if(!m.rowCount||!await isMember(m.rows[0].conversation_id,req.user.id))return res.status(404).json({error:'پیام پیدا نشد'})}else return res.status(400).json({error:'نوع منبع پشتیبانی نمی‌شود'});
+    const raw=superAppToken(24),expires=new Date(Date.now()+minutes*60000);await q(`INSERT INTO secure_share_links(owner_id,resource_type,resource_id,token_hash,max_uses,expires_at) VALUES($1,$2,$3,$4,$5,$6)`,[req.user.id,type,rid,superAppHash(raw),uses,expires]);res.json({ok:true,token:raw,expires_at:expires.toISOString(),max_uses:uses});
+  }catch(e){res.status(500).json({error:'ساخت لینک امن ناموفق بود'})}
+});
+app.get('/api/superapp/share-links/:token',async(req,res)=>{try{const r=await q(`SELECT id,resource_type,resource_id,max_uses,uses,expires_at,owner_id FROM secure_share_links WHERE token_hash=$1 AND revoked_at IS NULL`,[superAppHash(req.params.token)]);if(!r.rowCount)return res.status(404).json({error:'لینک معتبر نیست'});const x=r.rows[0];if(new Date(x.expires_at).getTime()<Date.now()||Number(x.uses)>=Number(x.max_uses))return res.status(410).json({error:'لینک منقضی شده است'});if(x.resource_type==='message'){const m=await q(`SELECT m.id,m.conversation_id,m.sender_id,m.text,m.kind,m.file_url,m.file_type,m.file_name,m.created_at,u.display_name,u.username,u.avatar FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.id=$1 AND m.deleted=false`,[x.resource_id]);if(!m.rowCount)return res.status(404).json({error:'منبع حذف شده است'});await q('UPDATE secure_share_links SET uses=uses+1 WHERE id=$1',[x.id]);return res.json({resource_type:'message',resource:m.rows[0]})}res.status(400).json({error:'منبع ناشناخته'})}catch(e){res.status(500).json({error:'دریافت لینک امن ناموفق بود'})}});
+
+app.get('/api/superapp/security-center',auth,async(req,res)=>{
+  const [sessions,devices,events]=await Promise.all([
+    q(`SELECT id,label,user_agent,ip_address,created_at,last_seen_at,revoked_at FROM user_sessions WHERE user_id=$1 ORDER BY last_seen_at DESC LIMIT 50`,[req.user.id]),
+    q(`SELECT id,name,platform,last_sync_at,created_at,revoked_at FROM sync_devices WHERE user_id=$1 ORDER BY created_at DESC`,[req.user.id]),
+    q(`SELECT event_type,ip_address,user_agent,details,created_at FROM user_security_events WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,[req.user.id])
+  ]);
+  res.json({sessions:sessions.rows,devices:devices.rows.map(x=>({...x,id:String(x.id)})),events:events.rows});
+});
+
+setInterval(async()=>{try{await q(`DELETE FROM qr_login_challenges WHERE expires_at<now() OR status IN ('consumed','expired','cancelled') AND created_at<now()-interval '1 day'`);await q(`DELETE FROM live_locations WHERE expires_at<=now()`)}catch(e){console.warn('superapp cleanup',e.message)}},60000);
+
 setInterval(processScheduledMessages,5000);
+setInterval(processNotificationJobs,3000);
+setInterval(async()=>{try{await q(`UPDATE films SET active=true,status='published',updated_at=now() WHERE status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at<=now()`)}catch(e){console.warn('film scheduler',e.message)}},30000);
 setInterval(async()=>{try{const r=await q(`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at<=now() RETURNING id,conversation_id`);for(const x of r.rows)io.to('conv:'+x.conversation_id).emit('message_deleted',Number(x.id));}catch(e){console.error('expiry cleanup',e.message)}},5000);
 
 async function start(){
@@ -2327,6 +2744,9 @@ async function start(){
   await ensureStage5Schema();
   await ensureFilmSchema();
   await ensureProfessionalSchema();
+  await ensureAdvancedSchema();
+  await ensureEnterpriseSchema();
+  await ensureSuperAppSchema();
   await ensureAdminSchema();
   await ensureStorageBucket();
   server.listen(PORT,()=>console.log(`Zento PostgreSQL backend listening on port ${PORT}`));
