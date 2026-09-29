@@ -1199,7 +1199,15 @@ io.on('connection', async socket => {
 
 
 // ---- Call history ----
-app.get('/api/calls/ice-config', auth, (req,res)=>{const servers=[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun.cloudflare.com:3478']}];const urls=String(process.env.TURN_URLS||process.env.TURN_URL||'').split(',').map(x=>x.trim()).filter(Boolean);if(urls.length){servers.push({urls,username:String(process.env.TURN_USERNAME||''),credential:String(process.env.TURN_CREDENTIAL||'')});}else{servers.push({urls:['turn:openrelay.metered.ca:80','turn:openrelay.metered.ca:443?transport=tcp','turns:openrelay.metered.ca:443?transport=tcp'],username:'openrelayproject',credential:'openrelayproject'});}res.json({iceServers:servers});});
+app.get('/api/calls/ice-config', auth, async (req,res)=>{
+  // Direct WebRTC mode: STUN only. TURN is intentionally disabled for Zento calls.
+  res.json({
+    iceServers:[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun.cloudflare.com:3478']}],
+    turnConfigured:false,
+    provider:'stun-direct',
+    mode:'direct'
+  });
+});
 app.get('/api/calls/history', auth, (req,res,next)=>requireFeature('calls',req,res,next), async (req,res)=>{try{const r=await q(`SELECT c.*,cu.display_name caller_name,cu.username caller_username,cu.avatar caller_avatar,ru.display_name receiver_name,ru.username receiver_username,ru.avatar receiver_avatar FROM calls c LEFT JOIN users cu ON cu.id=c.caller_id LEFT JOIN users ru ON ru.id=c.receiver_id WHERE c.caller_id=$1 OR c.receiver_id=$1 ORDER BY c.created_at DESC LIMIT 100`,[req.user.id]);res.json(r.rows.map(x=>({...x,id:Number(x.id),caller_id:x.caller_id?Number(x.caller_id):null,receiver_id:x.receiver_id?Number(x.receiver_id):null,duration:Number(x.duration||0),is_outgoing:Number(x.caller_id)===Number(req.user.id)})))}catch(e){console.error(e);res.status(500).json({error:'تاریخچه تماس در دسترس نیست'})}});
 
 // ---- Zento Stage 3: badges, statistics, group/channel management, smart notifications ----

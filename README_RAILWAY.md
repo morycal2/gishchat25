@@ -41,3 +41,15 @@ Do not expose `SUPABASE_SERVICE_ROLE_KEY` to the browser. Keep it only in Railwa
 - Added a persistent Settings quick-access button in the drawer.
 - Socket.IO uses polling on Railway to avoid noisy WebSocket upgrade failures while retaining real-time events.
 - Updated Zento logo asset.
+
+
+## WebRTC / TURN (v4.37.1)
+
+The call endpoint now supports a free Metered/Open Relay TURN configuration without exposing the TURN API key to the browser. Add these Railway variables:
+
+- `METERED_TURN_API_URL` — your Metered REST endpoint, e.g. `https://YOUR_APP.metered.live/api/v1/turn/credentials`
+- `METERED_TURN_API_KEY` — your Metered API key (server-side only)
+
+The app fetches the ICE server list on `/api/calls/ice-config`, caches it briefly, and reports whether TURN is configured. Direct static TURN credentials are also supported with `TURN_URLS`, `TURN_USERNAME`, and `TURN_CREDENTIAL`.
+
+Do not put the Metered API key in `public/app.js` or other browser-visible files.
